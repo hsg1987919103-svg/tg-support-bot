@@ -7,7 +7,7 @@ app.use(express.json());
 // ===================== 配置 =====================
 const TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const SUPPORT_CHAT_ID = process.env.GROUP_CHAT_ID; // ← 已改成 GROUP_CHAT_ID
+const SUPPORT_CHAT_ID = process.env.SUPPORT_CHAT_ID; // -100 开头（必须是字符串）
 
 console.log("🔧 BOT_TOKEN =", TOKEN);
 console.log("🔧 SUPPORT_CHAT_ID =", SUPPORT_CHAT_ID, "type =", typeof SUPPORT_CHAT_ID);
@@ -102,7 +102,7 @@ app.post("/", async (req, res) => {
         const botName =
           botInfo.data?.result?.username ||
           botInfo.data?.result?.first_name ||
-          "tu asistente";
+          "mi asistente";
 
         await axios.post(`${API}/sendMessage`, {
           chat_id: customerId,
@@ -156,14 +156,15 @@ app.post("/", async (req, res) => {
 
   // =============== 情况 2：客服在群里回复 ===============
   if (chatType === "supergroup") {
+    // 只处理我们的客服群（注意：左边转字符串比较）
     if (String(msg.chat.id) !== SUPPORT_CHAT_ID) {
       return res.sendStatus(200);
     }
 
     const topicId = msg.message_thread_id;
-    if (!topicId) return res.sendStatus(200);
+    if (!topicId) return res.sendStatus(200); // 必须在话题里回复
 
-    if (msg.from.is_bot) return res.sendStatus(200);
+    if (msg.from.is_bot) return res.sendStatus(200); // 不处理机器人消息
 
     const customerId = topicToCustomer.get(topicId);
     if (!customerId) {
@@ -172,6 +173,7 @@ app.post("/", async (req, res) => {
     }
 
     try {
+      // 图片
       if (msg.photo) {
         const fileId = msg.photo[msg.photo.length - 1].file_id;
         await axios.post(`${API}/sendPhoto`, {
@@ -182,6 +184,7 @@ app.post("/", async (req, res) => {
         return res.sendStatus(200);
       }
 
+      // 文本
       if (msg.text) {
         await axios.post(`${API}/sendMessage`, {
           chat_id: customerId,
@@ -195,6 +198,7 @@ app.post("/", async (req, res) => {
     return res.sendStatus(200);
   }
 
+  // 其他类型忽略
   return res.sendStatus(200);
 });
 
