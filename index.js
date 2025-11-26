@@ -6,11 +6,11 @@ app.use(express.json());
 
 // ===================== 配置 =====================
 const TOKEN = process.env.BOT_TOKEN;
+const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID; // 群ID (支持论坛超级群)
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const SUPPORT_CHAT_ID = process.env.SUPPORT_CHAT_ID; // -100 开头（必须是字符串）
 
 console.log("🔧 BOT_TOKEN =", TOKEN);
-console.log("🔧 SUPPORT_CHAT_ID =", SUPPORT_CHAT_ID, "type =", typeof SUPPORT_CHAT_ID);
+console.log("🔧 GROUP_CHAT_ID =", GROUP_CHAT_ID, "type =", typeof GROUP_CHAT_ID);
 console.log("🔧 WEBHOOK_URL =", WEBHOOK_URL);
 
 const API = `https://api.telegram.org/bot${TOKEN}`;
@@ -54,12 +54,12 @@ async function getOrCreateTopic(customer) {
     `${customer.first_name || ""} ${customer.last_name || ""}`.trim() || "无";
   const title = `客户 #${customerId}（${username}）`;
 
-  console.log("🧵 创建话题：", title, "chat_id =", SUPPORT_CHAT_ID);
+  console.log("🧵 创建话题：", title, "chat_id =", GROUP_CHAT_ID);
 
-  // 可选：调试 getChat，确认 chat_id 是否可用
+  // 调试 getChat
   try {
     const chatInfo = await axios.get(`${API}/getChat`, {
-      params: { chat_id: SUPPORT_CHAT_ID }
+      params: { chat_id: GROUP_CHAT_ID }
     });
     console.log("getChat 结果：", chatInfo.data?.result?.title);
   } catch (e) {
@@ -67,7 +67,7 @@ async function getOrCreateTopic(customer) {
   }
 
   const res = await axios.post(`${API}/createForumTopic`, {
-    chat_id: SUPPORT_CHAT_ID,
+    chat_id: GROUP_CHAT_ID,
     name: title
   });
 
@@ -81,7 +81,7 @@ async function getOrCreateTopic(customer) {
 }
 
 // ===================== 主 Webhook =====================
-app.post("/", async (req, res) => {
+app.post("/webhook", async (req, res) => {
   const update = req.body;
   const msg = update.message;
   if (!msg) return res.sendStatus(200);
@@ -96,7 +96,7 @@ app.post("/", async (req, res) => {
     const customerId = customer.id;
 
     try {
-      // ------------------ 自动欢迎新用户（只发一次） ------------------
+      // 自动欢迎（只发一次）
       if (!customerToTopic.has(customerId)) {
         const botInfo = await axios.get(`${API}/getMe`);
         const botName =
@@ -110,10 +110,10 @@ app.post("/", async (req, res) => {
         });
       }
 
-      // ------------------ 创建或获取话题 ------------------
+      // 创建 / 获取话题
       const topicId = await getOrCreateTopic(customer);
 
-      // ------------------ 构建内容 ------------------
+      // -------- 构建内容 --------
       let content = msg.text || "";
       if (!content) {
         if (msg.photo) content = "[Imagen]";
@@ -130,18 +130,18 @@ app.post("/", async (req, res) => {
         `📩 Mensaje del cliente\n` +
         `ID: ${customerId}\nUsuario: ${username}\nNombre: ${fullName}\n`;
 
-      // ------------------ 发到话题 ------------------
+      // 发送到客服群话题
       await axios.post(`${API}/sendMessage`, {
-        chat_id: SUPPORT_CHAT_ID,
+        chat_id: GROUP_CHAT_ID,
         message_thread_id: topicId,
         text: `${header}Contenido:\n${content}`
       });
 
-      // ------------------ 图片处理 ------------------
+      // 图片处理
       if (msg.photo) {
         const fileId = msg.photo[msg.photo.length - 1].file_id;
         await axios.post(`${API}/sendPhoto`, {
-          chat_id: SUPPORT_CHAT_ID,
+          chat_id: GROUP_CHAT_ID,
           message_thread_id: topicId,
           photo: fileId,
           caption: `Imagen enviada por el cliente (ID ${customerId})`
@@ -154,21 +154,21 @@ app.post("/", async (req, res) => {
     return res.sendStatus(200);
   }
 
-  // =============== 情况 2：客服在群里回复 ===============
+  // =============== 情况 2：客服在群内回复 ===============
   if (chatType === "supergroup") {
-    // 只处理我们的客服群（注意：左边转字符串比较）
-    if (String(msg.chat.id) !== SUPPORT_CHAT_ID) {
+    if (String(msg.chat.id) !== GROUP_CHAT_ID) {
       return res.sendStatus(200);
     }
 
     const topicId = msg.message_thread_id;
-    if (!topicId) return res.sendStatus(200); // 必须在话题里回复
+    if (!topicId) return res.sendStatus(200);
 
-    if (msg.from.is_bot) return res.sendStatus(200); // 不处理机器人消息
+    // 不处理机器人自己的消息
+    if (msg.from.is_bot) return res.sendStatus(200);
 
     const customerId = topicToCustomer.get(topicId);
     if (!customerId) {
-      console.log("⚠️ 没找到对应客户 topicId =", topicId);
+      console.log("⚠️ 找不到对应客户 topicId =", topicId);
       return res.sendStatus(200);
     }
 
@@ -198,7 +198,6 @@ app.post("/", async (req, res) => {
     return res.sendStatus(200);
   }
 
-  // 其他类型忽略
   return res.sendStatus(200);
 });
 
