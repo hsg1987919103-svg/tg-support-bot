@@ -1,128 +1,178 @@
 import express from "express";
-import { Telegraf } from "telegraf";
-import dotenv from "dotenv";
-
-dotenv.config();
+import axios from "axios";
 
 const app = express();
 app.use(express.json());
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
+// ===================== 配置 =====================
+const TOKEN = process.env.BOT_TOKEN;
 const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
-console.log("🔑 BOT_TOKEN =", BOT_TOKEN);
-console.log("👥 GROUP_CHAT_ID =", GROUP_CHAT_ID);
-console.log("🌐 WEBHOOK_URL =", WEBHOOK_URL);
+console.log("🔧 BOT_TOKEN =", TOKEN);
+console.log("🔧 GROUP_CHAT_ID =", GROUP_CHAT_ID);
+console.log("🔧 WEBHOOK_URL =", WEBHOOK_URL);
 
-const bot = new Telegraf(BOT_TOKEN);
+const API = `https://api.telegram.org/bot${TOKEN}`;
 
-// -----------------------------
-// A. 客户 → 发消息到机器人
-// 自动转发到客服群
-// -----------------------------
-bot.on("message", async (ctx) => {
+// 内存映射
+const customerToTopic = new Map(); // customerId -> topicId
+const topicToCustomer = new Map(); // topicId -> customerId
+
+// ===================== 设置 Webhook =====================
+async function setWebhook() {
+  try {
+    const res = await axios.get(`${API}/setWebhook`, {
+      params: { url: WEBHOOK_URL }
+    });
+    console.log("Webhook 已设置：", res.data);
+  } catch (e) {
+    console.error("Webhook 设置失败：", e.response?.data || e.message);
+  }
+}
+setWebhook();
+
+// ===================== 日志 =====================
+function logMessage(prefix, msg) {
+  console.log(
+    `${prefix} chatId=${msg.chat.id} type=${msg.chat.type} ` +
+      `thread=${msg.message_thread_id ?? "-"} from=${msg.from.id} ` +
+      `text=${msg.text || "[非文本]"}`
+  );
+}
+
+// ===================== 创建话题 =====================
+async function getOrCreateTopic(customer) {
+  const customerId = customer.id;
+
+  if (customerToTopic.has(customerId)) {
+    return customerToTopic.get(customerId);
+  }
+
+  const title = `客户 ${customerId}`;
+
+  console.log("🧵 创建话题：", title);
+
+  const res = await axios.post(`${API}/createForumTopic`, {
+    chat_id: GROUP_CHAT_ID,
+    name: title
+  });
+
+  const topicId = res.data?.result?.message_thread_id;
+  if (!topicId) throw new Error("createForumTopic 未返回 message_thread_id");
+
+  customerToTopic.set(customerId, topicId);
+  topicToCustomer.set(topicId, customerId);
+
+  return topicId;
+}
+
+// ===================== 主 Webhook =====================
+app.post("/webhook", async (req, res) => {
+  const update = req.body;
+  const msg = update.message;
+  if (!msg) return res.sendStatus(200);
+
+  logMessage("收到消息：", msg);
+
+  const chatType = msg.chat.type;
+
+  // =============== 情况 1：客户私聊机器人 ===============
+  if (chatType === "private") {
+    const customer = msg.from;
+    const customerId = customer.id;
+
     try {
-        const msg = ctx.message;
-
-        const userId = msg.from.id;
-        const username = msg.from.username ? `@${msg.from.username}` : "无用户名";
-        const name = msg.from.first_name || "";
-        const text = msg.text || "(非文字消息)";
-
-        const forwardText =
-            `📩 客户来信\n` +
-            `ID: ${userId}\n` +
-            `用户: ${username}\n` +
-            `名称: ${name}\n\n` +
-            `${text}`;
-
-        await ctx.telegram.sendMessage(GROUP_CHAT_ID, forwardText);
-        console.log("✔️ 已转发客户消息到群组");
-    } catch (err) {
-        console.error("❌ 转发失败:", err);
-    }
-});
-
-// ------------------------------------------------
-// B. 客服在群里回复 → 只把“真正的回复内容”发回客户
-// ------------------------------------------------
-bot.on("message", async (ctx) => {
-    try {
-        const msg = ctx.message;
-        const chatId = msg.chat.id;
-
-        // 只处理群组消息
-        if (chatId.toString() !== GROUP_CHAT_ID) return;
-
-        if (!msg.reply_to_message) return; // 如果没有 reply，不处理
-
-        const repliedText = msg.reply_to_message.text;
-        if (!repliedText) return;
-
-        // -----------------------------
-        // 解析客户 ID
-        // -----------------------------
-        const match = repliedText.match(/ID:\s*(\d+)/);
-        if (!match) {
-            console.log("⚠️ 无法解析客户 ID");
-            return;
-        }
-
-        const targetUserId = match[1]; // 客户 Telegram ID
-
-        // -----------------------------
-        // 客服真正回复的内容 = 当前这条消息
-        // 但需要去除前缀信息
-        // -----------------------------
-        let replyText = msg.text || "";
-
-        // 删除这些固定前缀
-        const removePatterns = [
-            "📩 Mensaje del cliente",
-            "📩 客户来信",
-            "ID:",
-            "Usuario:",
-            "用户:",
-            "Nombre:",
-            "名称:"
-        ];
-
-        removePatterns.forEach(p => {
-            replyText = replyText.replace(p, "");
+      // 自动欢迎（只发一次）
+      if (!customerToTopic.has(customerId)) {
+        await axios.post(`${API}/sendMessage`, {
+          chat_id: customerId,
+          text: `Hola cariño ❤️\nSoy tu asistente, ¿en qué puedo ayudarte?`
         });
+      }
 
-        // 删除可能多余空行
-        replyText = replyText.trim();
+      // 获取 / 创建话题
+      const topicId = await getOrCreateTopic(customer);
 
-        if (!replyText) {
-            console.log("⚠️ 回复内容为空，忽略发送");
-            return;
-        }
+      // -------- 构建内容（无头部） --------
+      let content = msg.text || "";
+      if (!content) {
+        if (msg.photo) content = "[Imagen]";
+        else if (msg.document) content = "[Documento]";
+        else content = "[Mensaje no textual]";
+      }
 
-        // -----------------------------
-        // 发送给客户
-        // -----------------------------
-        await ctx.telegram.sendMessage(targetUserId, replyText);
+      // ---- 把消息发到客服群对应话题（无客户信息前缀）----
+      await axios.post(`${API}/sendMessage`, {
+        chat_id: GROUP_CHAT_ID,
+        message_thread_id: topicId,
+        text: content
+      });
 
-        console.log("📤 已发送客服回复给客户:", targetUserId);
-
-    } catch (err) {
-        console.error("❌ 处理客服回复失败:", err);
+      // 图片处理
+      if (msg.photo) {
+        const fileId = msg.photo[msg.photo.length - 1].file_id;
+        await axios.post(`${API}/sendPhoto`, {
+          chat_id: GROUP_CHAT_ID,
+          message_thread_id: topicId,
+          photo: fileId
+        });
+      }
+    } catch (e) {
+      console.error("处理客户消息失败：", e.response?.data || e.message);
     }
+
+    return res.sendStatus(200);
+  }
+
+  // =============== 情况 2：客服在群内回复 ===============
+  if (chatType === "supergroup") {
+    if (String(msg.chat.id) !== GROUP_CHAT_ID) {
+      return res.sendStatus(200);
+    }
+
+    const topicId = msg.message_thread_id;
+    if (!topicId) return res.sendStatus(200);
+
+    // 不处理机器人消息
+    if (msg.from.is_bot) return res.sendStatus(200);
+
+    const customerId = topicToCustomer.get(topicId);
+    if (!customerId) {
+      console.log("⚠️ 找不到对应客户 topicId =", topicId);
+      return res.sendStatus(200);
+    }
+
+    try {
+      // 图片
+      if (msg.photo) {
+        const fileId = msg.photo[msg.photo.length - 1].file_id;
+        await axios.post(`${API}/sendPhoto`, {
+          chat_id: customerId,
+          photo: fileId,
+          caption: msg.caption || ""
+        });
+        return res.sendStatus(200);
+      }
+
+      // 文本
+      if (msg.text) {
+        await axios.post(`${API}/sendMessage`, {
+          chat_id: customerId,
+          text: msg.text
+        });
+      }
+    } catch (e) {
+      console.error("客服回复失败：", e.response?.data || e.message);
+    }
+
+    return res.sendStatus(200);
+  }
+
+  return res.sendStatus(200);
 });
 
-// -----------------------------
-// 设置 Webhook
-// -----------------------------
-bot.telegram.setWebhook(`${WEBHOOK_URL}`);
-
-app.post("/webhook", (req, res) => {
-    bot.handleUpdate(req.body);
-    res.sendStatus(200);
-});
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-    console.log(`🚀 Server running on port ${port}`);
+// ===================== 启动服务器 =====================
+app.listen(Number(process.env.PORT) || 3000, () => {
+  console.log("🚀 Bot 已启动");
 });
