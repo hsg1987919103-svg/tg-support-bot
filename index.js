@@ -7,277 +7,229 @@ app.use(express.json());
 
 // ===================== 配置 =====================
 const TOKEN = process.env.BOT_TOKEN;
-const GROUP_CHAT_ID = String(process.env.GROUP_CHAT_ID);
+const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
+console.log("🔧 BOT_TOKEN =", TOKEN);
+console.log("🔧 GROUP_CHAT_ID =", GROUP_CHAT_ID);
+console.log("🔧 WEBHOOK_URL =", WEBHOOK_URL);
+
 const API = `https://api.telegram.org/bot${TOKEN}`;
+
+// ===================== 持久化存储 =====================
 const MAPPING_FILE = "./mapping.json";
 
-// ===================== 映射 =====================
-const customerToTopic = new Map();
-const topicToCustomer = new Map();
-const customerMsgToGroupMsg = new Map();
-const groupMsgToCustomer = new Map();
+// 内存映射
+const customerToTopic = new Map();          // customerId -> topicId
+const topicToCustomer = new Map();          // topicId -> customerId
+const customerMsgToGroupMsg = new Map();    // customerMsgId -> groupMsgId
+const groupMsgToCustomer = new Map();       // groupMsgId -> { customerId, customerMsgId }
 
-// ===================== 映射持久化 =====================
+// --- 从文件加载映射 ---
 function loadMapping() {
-  if (!fs.existsSync(MAPPING_FILE)) return;
-  const d = JSON.parse(fs.readFileSync(MAPPING_FILE, "utf8"));
-  d.customerToTopic?.forEach(([k, v]) => customerToTopic.set(k, v));
-  d.topicToCustomer?.forEach(([k, v]) => topicToCustomer.set(k, v));
-  d.customerMsgToGroupMsg?.forEach(([k, v]) => customerMsgToGroupMsg.set(k, v));
-  d.groupMsgToCustomer?.forEach(([k, v]) => groupMsgToCustomer.set(k, v));
-  console.log("📥 映射已加载");
+  if (!fs.existsSync(MAPPING_FILE)) {
+    console.log("📁 未找到 mapping.json，将创建新文件。");
+    return;
+  }
+
+  try {
+    const data = JSON.parse(fs.readFileSync(MAPPING_FILE, "utf8"));
+    data.customerToTopic?.forEach(([k, v]) => customerToTopic.set(k, v));
+    data.topicToCustomer?.forEach(([k, v]) => topicToCustomer.set(k, v));
+    data.customerMsgToGroupMsg?.forEach(([k, v]) => customerMsgToGroupMsg.set(k, v));
+    data.groupMsgToCustomer?.forEach(([k, v]) => groupMsgToCustomer.set(k, v));
+
+    console.log("📥 映射已加载。");
+  } catch (e) {
+    console.error("❌ 映射文件读取失败：", e.message);
+  }
 }
 
+// --- 保存映射到文件 ---
 function saveMapping() {
-  fs.writeFileSync(
-    MAPPING_FILE,
-    JSON.stringify({
-      customerToTopic: [...customerToTopic],
-      topicToCustomer: [...topicToCustomer],
-      customerMsgToGroupMsg: [...customerMsgToGroupMsg],
-      groupMsgToCustomer: [...groupMsgToCustomer],
-    }, null, 2)
-  );
+  const data = {
+    customerToTopic: [...customerToTopic],
+    topicToCustomer: [...topicToCustomer],
+    customerMsgToGroupMsg: [...customerMsgToGroupMsg],
+    groupMsgToCustomer: [...groupMsgToCustomer],
+  };
+
+  fs.writeFileSync(MAPPING_FILE, JSON.stringify(data, null, 2));
+  console.log("💾 映射已保存。");
 }
 
 loadMapping();
 
-// ===================== Webhook =====================
-axios.get(`${API}/setWebhook`, { params: { url: WEBHOOK_URL } })
-  .then(() => console.log("✅ Webhook 已设置"))
-  .catch(e => console.error("❌ Webhook 失败", e.message));
-
-// ===================== 工具函数 =====================
-async function safeDelete(chatId, messageId) {
+// ===================== 设置 Webhook =====================
+async function setWebhook() {
   try {
-    await axios.post(`${API}/deleteMessage`, {
-      chat_id: chatId,
-      message_id: messageId
+    const res = await axios.get(`${API}/setWebhook`, {
+      params: { url: WEBHOOK_URL },
     });
-  } catch {}
+    console.log("Webhook 已设置：", res.data);
+  } catch (e) {
+    console.error("Webhook 设置失败：", e.response?.data || e.message);
+  }
+}
+setWebhook();
+
+// ===================== 日志 =====================
+function logMessage(prefix, msg) {
+  console.log(
+    `${prefix} chatId=${msg.chat.id} type=${msg.chat.type} ` +
+      `thread=${msg.message_thread_id ?? "-"} from=${msg.from.id} ` +
+      `text=${msg.text || "[非文本]"}`
+  );
 }
 
-async function getOrCreateTopic(customerId) {
+// ===================== 话题获取/创建 =====================
+async function getOrCreateTopic(customer) {
+  const customerId = customer.id;
+
   if (customerToTopic.has(customerId)) {
     return customerToTopic.get(customerId);
   }
 
-  const r = await axios.post(`${API}/createForumTopic`, {
+  const title = `客户 ${customerId}`;
+  console.log("🧵 创建话题：", title);
+
+  const res = await axios.post(`${API}/createForumTopic`, {
     chat_id: GROUP_CHAT_ID,
-    name: `客户 ${customerId}`,
+    name: title,
   });
 
-  const topicId = r.data.result.message_thread_id;
+  const topicId = res.data?.result?.message_thread_id;
+  if (!topicId) throw new Error("createForumTopic 未返回 topicId");
+
   customerToTopic.set(customerId, topicId);
   topicToCustomer.set(topicId, customerId);
   saveMapping();
 
-  await new Promise(r => setTimeout(r, 300));
   return topicId;
 }
 
-async function safeSend(method, payload, customerId) {
-  let topicId = await getOrCreateTopic(customerId);
-
-  try {
-    return await axios.post(`${API}/${method}`, {
-      ...payload,
-      chat_id: GROUP_CHAT_ID,
-      message_thread_id: topicId,
-    });
-  } catch (e) {
-    const desc = e.response?.data?.description || "";
-    if (/thread|topic/i.test(desc)) {
-      customerToTopic.delete(customerId);
-      topicToCustomer.delete(topicId);
-      saveMapping();
-
-      topicId = await getOrCreateTopic(customerId);
-
-      return await axios.post(`${API}/${method}`, {
-        ...payload,
-        chat_id: GROUP_CHAT_ID,
-        message_thread_id: topicId,
-      });
-    }
-    throw e;
-  }
-}
-
-// ===================== Webhook 入口 =====================
+// ===================== Webhook =====================
 app.post("/webhook", async (req, res) => {
-  const u = req.body;
-
-  // ===== 删除同步 =====
-  if (u.deleted_messages) {
-    for (const m of u.deleted_messages) {
-      const id = m.message_id;
-
-      if (customerMsgToGroupMsg.has(id)) {
-        const gid = customerMsgToGroupMsg.get(id);
-        await safeDelete(GROUP_CHAT_ID, gid);
-        customerMsgToGroupMsg.delete(id);
-        groupMsgToCustomer.delete(gid);
-      }
-
-      if (groupMsgToCustomer.has(id)) {
-        const { customerId, customerMsgId } = groupMsgToCustomer.get(id);
-        await safeDelete(customerId, customerMsgId);
-        groupMsgToCustomer.delete(id);
-        customerMsgToGroupMsg.delete(customerMsgId);
-      }
-    }
-    saveMapping();
-    return res.sendStatus(200);
-  }
-
-  const msg = u.message;
+  const update = req.body;
+  const msg = update.message;
   if (!msg) return res.sendStatus(200);
 
-  // ===================== 客户私聊 =====================
-  if (msg.chat.type === "private") {
-    const customerId = msg.from.id;
+  logMessage("收到消息：", msg);
 
-    if (msg.text === "/start") {
-      if (customerToTopic.has(customerId)) {
-        return res.sendStatus(200);
-      }
+  const chatType = msg.chat.type;
 
-      await axios.post(`${API}/sendMessage`, {
-        chat_id: customerId,
-        text: "Hola soy Lia, ¿cómo debería llamarte?",
-      });
-      return res.sendStatus(200);
-    }
-
-    const name = [msg.from.first_name, msg.from.last_name].filter(Boolean).join(" ");
-    const username = msg.from.username ? `@${msg.from.username}` : "无用户名";
-    const header = `👤 <b>${name || "未知"}</b> (${username} | ${customerId})`;
-
-    let sent;
+  // =============== 1. 客户私聊机器人 ===============
+  if (chatType === "private") {
+    const customer = msg.from;
+    const customerId = customer.id;
 
     try {
-      if (msg.text) {
-        sent = await safeSend("sendMessage", {
-          text: `${header}\n\n${msg.text}`,
-          parse_mode: "HTML",
-        }, customerId);
-      } else if (msg.photo) {
-        sent = await safeSend("sendPhoto", {
-          photo: msg.photo.at(-1).file_id,
-          caption: header,
-          parse_mode: "HTML",
-        }, customerId);
-      } else {
-        const map = {
-          voice: ["sendVoice", "voice"],
-          audio: ["sendAudio", "audio"],
-          video: ["sendVideo", "video"],
-          video_note: ["sendVideoNote", "video_note"],
-          document: ["sendDocument", "document"],
-          sticker: ["sendSticker", "sticker"],
-        };
-
-        for (const k in map) {
-          if (msg[k]) {
-            const [method, field] = map[k];
-            sent = await safeSend(method, {
-              [field]: msg[k].file_id,
-              caption: header,
-              parse_mode: "HTML",
-            }, customerId);
-            break;
-          }
-        }
+      // ===== 首次欢迎（已修改）=====
+      if (!customerToTopic.has(customerId)) {
+        await axios.post(`${API}/sendMessage`, {
+          chat_id: customerId,
+          text: "Hola soy Lia, ¿cómo debería llamarte?",
+        });
       }
 
-      if (sent) {
-        const gid = sent.data.result.message_id;
-        customerMsgToGroupMsg.set(msg.message_id, gid);
-        groupMsgToCustomer.set(gid, {
-          customerId,
-          customerMsgId: msg.message_id
+      // 获取 / 创建话题
+      const topicId = await getOrCreateTopic(customer);
+
+      // ----- 转发到群 -----
+      let content = msg.text || "[消息]";
+      if (msg.photo) content = "[Imagen]";
+      if (msg.document) content = "[Documento]";
+
+      const sent = await axios.post(`${API}/sendMessage`, {
+        chat_id: GROUP_CHAT_ID,
+        message_thread_id: topicId,
+        text: content,
+      });
+
+      const groupMsgId = sent.data.result.message_id;
+
+      // 保存消息映射（用于引用）
+      customerMsgToGroupMsg.set(msg.message_id, groupMsgId);
+      groupMsgToCustomer.set(groupMsgId, {
+        customerId,
+        customerMsgId: msg.message_id,
+      });
+      saveMapping();
+
+      // 图片转发
+      if (msg.photo) {
+        const fileId = msg.photo[msg.photo.length - 1].file_id;
+        await axios.post(`${API}/sendPhoto`, {
+          chat_id: GROUP_CHAT_ID,
+          message_thread_id: topicId,
+          photo: fileId,
         });
-        saveMapping();
       }
     } catch (e) {
-      console.error("❌ 客户消息失败", e.response?.data || e.message);
+      console.error("处理客户消息失败：", e.response?.data || e.message);
     }
 
     return res.sendStatus(200);
   }
 
-  // ===================== 客服群（真对话模式） =====================
-  if (
-    msg.chat.type === "supergroup" &&
-    String(msg.chat.id) === GROUP_CHAT_ID &&
-    msg.message_thread_id &&
-    !msg.from.is_bot
-  ) {
-    const customerId = topicToCustomer.get(msg.message_thread_id);
+  // =============== 2. 客服在群内回复 ===============
+  if (chatType === "supergroup") {
+    if (String(msg.chat.id) !== GROUP_CHAT_ID) return res.sendStatus(200);
+
+    const topicId = msg.message_thread_id;
+    if (!topicId) return res.sendStatus(200);
+    if (msg.from.is_bot) return res.sendStatus(200);
+
+    const customerId = topicToCustomer.get(topicId);
     if (!customerId) return res.sendStatus(200);
 
     try {
-      const method =
-        msg.text ? "sendMessage" :
-        msg.photo ? "sendPhoto" :
-        msg.voice ? "sendVoice" :
-        msg.audio ? "sendAudio" :
-        msg.video ? "sendVideo" :
-        msg.video_note ? "sendVideoNote" :
-        msg.document ? "sendDocument" :
-        msg.sticker ? "sendSticker" :
-        null;
+      // ===== 引用回复 =====
+      if (msg.reply_to_message) {
+        const repliedGroupMsgId = msg.reply_to_message.message_id;
+        const mapping = groupMsgToCustomer.get(repliedGroupMsgId);
 
-      if (!method) return res.sendStatus(200);
+        if (mapping) {
+          const { customerId, customerMsgId } = mapping;
 
-      const payload =
-        msg.text ? { text: msg.text } :
-        msg.photo ? { photo: msg.photo.at(-1).file_id } :
-        msg.voice ? { voice: msg.voice.file_id } :
-        msg.audio ? { audio: msg.audio.file_id } :
-        msg.video ? { video: msg.video.file_id } :
-        msg.video_note ? { video_note: msg.video_note.file_id } :
-        msg.document ? { document: msg.document.file_id } :
-        msg.sticker ? { sticker: msg.sticker.file_id } : {};
+          await axios.post(`${API}/sendMessage`, {
+            chat_id: customerId,
+            text: msg.text,
+            reply_to_message_id: customerMsgId,
+          });
 
-      // 🔑 真对话关键：reply 映射
-      const replyToGroupMsgId = msg.reply_to_message?.message_id;
-      const replyMapping =
-        replyToGroupMsgId &&
-        groupMsgToCustomer.get(replyToGroupMsgId);
+          return res.sendStatus(200);
+        }
+      }
 
-      const sent = await axios.post(`${API}/${method}`, {
-        chat_id: customerId,
-        ...payload,
-        ...(replyMapping && {
-          reply_to_message_id: replyMapping.customerMsgId
-        }),
-      });
+      // 普通文本
+      if (msg.text) {
+        await axios.post(`${API}/sendMessage`, {
+          chat_id: customerId,
+          text: msg.text,
+        });
+      }
 
-      // 🔁 建立双向映射
-      const customerMsgId = sent.data.result.message_id;
-
-      groupMsgToCustomer.set(msg.message_id, {
-        customerId,
-        customerMsgId
-      });
-      customerMsgToGroupMsg.set(customerMsgId, msg.message_id);
-      saveMapping();
-
+      // 图片
+      if (msg.photo) {
+        const fileId = msg.photo[msg.photo.length - 1].file_id;
+        await axios.post(`${API}/sendPhoto`, {
+          chat_id: customerId,
+          photo: fileId,
+          caption: msg.caption || "",
+        });
+      }
     } catch (e) {
-      console.error("❌ 客服回复失败", e.response?.data || e.message);
+      console.error("客服回复失败：", e.response?.data || e.message);
     }
 
     return res.sendStatus(200);
   }
 
-  res.sendStatus(200);
+  return res.sendStatus(200);
 });
 
-// ===================== 启动 =====================
-app.listen(process.env.PORT || 3000, () => {
-  console.log("🚀 Telegram 客服 Bot（真对话模式）已启动");
+// ===================== 启动服务器 =====================
+app.listen(Number(process.env.PORT) || 3000, () => {
+  console.log("🚀 Bot 已启动");
 });
