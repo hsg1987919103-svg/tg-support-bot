@@ -88,7 +88,8 @@ async function safeSend(method, payload, customerId) {
       message_thread_id: topicId,
     });
   } catch (e) {
-    if (e.response?.data?.description?.includes("message thread not found")) {
+    const desc = e.response?.data?.description || "";
+    if (/thread|topic/i.test(desc)) {
       customerToTopic.delete(customerId);
       topicToCustomer.delete(topicId);
       saveMapping();
@@ -139,14 +140,11 @@ app.post("/webhook", async (req, res) => {
   if (msg.chat.type === "private") {
     const customerId = msg.from.id;
 
-    // ✅ 只对【新客户】响应 /start
     if (msg.text === "/start") {
       if (customerToTopic.has(customerId)) {
-        // 老客户，静默处理
         return res.sendStatus(200);
       }
 
-      // 新客户
       await axios.post(`${API}/sendMessage`, {
         chat_id: customerId,
         text: "Hola soy Lia, ¿cómo debería llamarte?",
@@ -211,7 +209,7 @@ app.post("/webhook", async (req, res) => {
     return res.sendStatus(200);
   }
 
-  // ===================== 客服群 =====================
+  // ===================== 客服群（真对话模式） =====================
   if (
     msg.chat.type === "supergroup" &&
     String(msg.chat.id) === GROUP_CHAT_ID &&
@@ -245,10 +243,30 @@ app.post("/webhook", async (req, res) => {
         msg.document ? { document: msg.document.file_id } :
         msg.sticker ? { sticker: msg.sticker.file_id } : {};
 
-      await axios.post(`${API}/${method}`, {
+      // 🔑 真对话关键：reply 映射
+      const replyToGroupMsgId = msg.reply_to_message?.message_id;
+      const replyMapping =
+        replyToGroupMsgId &&
+        groupMsgToCustomer.get(replyToGroupMsgId);
+
+      const sent = await axios.post(`${API}/${method}`, {
         chat_id: customerId,
         ...payload,
+        ...(replyMapping && {
+          reply_to_message_id: replyMapping.customerMsgId
+        }),
       });
+
+      // 🔁 建立双向映射
+      const customerMsgId = sent.data.result.message_id;
+
+      groupMsgToCustomer.set(msg.message_id, {
+        customerId,
+        customerMsgId
+      });
+      customerMsgToGroupMsg.set(customerMsgId, msg.message_id);
+      saveMapping();
+
     } catch (e) {
       console.error("❌ 客服回复失败", e.response?.data || e.message);
     }
@@ -261,5 +279,5 @@ app.post("/webhook", async (req, res) => {
 
 // ===================== 启动 =====================
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🚀 Telegram 客服 Bot（老客户 /start 只响应一次）已启动");
+  console.log("🚀 Telegram 客服 Bot（真对话模式）已启动");
 });
