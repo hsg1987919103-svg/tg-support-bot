@@ -52,12 +52,17 @@ axios.get(`${API}/setWebhook`, { params: { url: WEBHOOK_URL } })
 // ===================== 工具函数 =====================
 async function safeDelete(chatId, messageId) {
   try {
-    await axios.post(`${API}/deleteMessage`, { chat_id: chatId, message_id: messageId });
+    await axios.post(`${API}/deleteMessage`, {
+      chat_id: chatId,
+      message_id: messageId
+    });
   } catch {}
 }
 
 async function getOrCreateTopic(customerId) {
-  if (customerToTopic.has(customerId)) return customerToTopic.get(customerId);
+  if (customerToTopic.has(customerId)) {
+    return customerToTopic.get(customerId);
+  }
 
   const r = await axios.post(`${API}/createForumTopic`, {
     chat_id: GROUP_CHAT_ID,
@@ -134,7 +139,14 @@ app.post("/webhook", async (req, res) => {
   if (msg.chat.type === "private") {
     const customerId = msg.from.id;
 
+    // ✅ 只对【新客户】响应 /start
     if (msg.text === "/start") {
+      if (customerToTopic.has(customerId)) {
+        // 老客户，静默处理
+        return res.sendStatus(200);
+      }
+
+      // 新客户
       await axios.post(`${API}/sendMessage`, {
         chat_id: customerId,
         text: "Hola soy Lia, ¿cómo debería llamarte?",
@@ -149,25 +161,18 @@ app.post("/webhook", async (req, res) => {
     let sent;
 
     try {
-      // ===== 文字 =====
       if (msg.text) {
         sent = await safeSend("sendMessage", {
           text: `${header}\n\n${msg.text}`,
           parse_mode: "HTML",
         }, customerId);
-      }
-
-      // ===== 图片 =====
-      else if (msg.photo) {
+      } else if (msg.photo) {
         sent = await safeSend("sendPhoto", {
           photo: msg.photo.at(-1).file_id,
           caption: header,
           parse_mode: "HTML",
         }, customerId);
-      }
-
-      // ===== 语音 / 音频 / 视频 / 文件 / 贴纸 =====
-      else {
+      } else {
         const map = {
           voice: ["sendVoice", "voice"],
           audio: ["sendAudio", "audio"],
@@ -193,7 +198,10 @@ app.post("/webhook", async (req, res) => {
       if (sent) {
         const gid = sent.data.result.message_id;
         customerMsgToGroupMsg.set(msg.message_id, gid);
-        groupMsgToCustomer.set(gid, { customerId, customerMsgId: msg.message_id });
+        groupMsgToCustomer.set(gid, {
+          customerId,
+          customerMsgId: msg.message_id
+        });
         saveMapping();
       }
     } catch (e) {
@@ -253,5 +261,5 @@ app.post("/webhook", async (req, res) => {
 
 // ===================== 启动 =====================
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🚀 Telegram 客服 Bot（多媒体完整版）已启动");
+  console.log("🚀 Telegram 客服 Bot（老客户 /start 只响应一次）已启动");
 });
