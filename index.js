@@ -1,164 +1,198 @@
 import express from "express";
-import axios from "axios";
+import TelegramBot from "node-telegram-bot-api";
 import pkg from "pg";
 
 const { Pool } = pkg;
+
+// ================== 配置 ==================
+const TOKEN = process.env.BOT_TOKEN;          // Telegram 机器人 Token
+const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID; // 客服群 ID
+const DATABASE_URL = process.env.DATABASE_URL;   // PostgreSQL 连接字符串
+
+// ================== 初始化 ==================
 const app = express();
 app.use(express.json());
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID;
-const DATABASE_URL = process.env.DATABASE_URL;
-const PORT = process.env.PORT || 3000;
+const bot = new TelegramBot(TOKEN, { polling: false });
+const pool = new Pool({ connectionString: DATABASE_URL });
 
-// ================= PostgreSQL 初始化（可选） =================
-let pool;
-if (DATABASE_URL) {
-  pool = new Pool({
-    connectionString: DATABASE_URL,
-    ssl: { rejectUnauthorized: false },
-  });
+// ================== 数据库工具函数 ==================
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS messages (
-      id SERIAL PRIMARY KEY,
-      update_id BIGINT,
-      customer_id BIGINT,
-      customer_name TEXT,
-      chat_type TEXT,
-      message_type TEXT,
-      content TEXT,
-      topic_id BIGINT,
-      timestamp TIMESTAMP DEFAULT NOW()
-    );
-  `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS topics (
-      id SERIAL PRIMARY KEY,
-      customer_id BIGINT UNIQUE,
-      topic_id BIGINT
-    );
-  `);
-}
-
-// ================= 测试接口 =================
-app.get("/", (req, res) => res.send("Bot running"));
-
-// ================= Webhook 接口 =================
-app.post("/webhook", async (req, res) => {
+async function ensureUser(telegramId, name) {
+  const client = await pool.connect();
   try {
-    const update = req.body;
-    console.log("🔥 Webhook hit", JSON.stringify(update, null, 2));
-    res.sendStatus(200);
-
-    if (!update.message) return;
-    const msg = update.message;
-    const customerId = msg.from.id;
-    const customerName = msg.from.first_name;
-
-    // ================= 消息类型识别 =================
-    const msgType = msg.text ? "text" :
-                    msg.photo ? "photo" :
-                    msg.voice ? "voice" :
-                    msg.document ? "file" : "unknown";
-
-    let content = msg.text || "";
-    if (msg.photo) content = `[Photo] file_id: ${msg.photo[msg.photo.length - 1].file_id}`;
-    if (msg.voice) content = `[Voice] file_id: ${msg.voice.file_id}`;
-    if (msg.document) content = `[File] file_id: ${msg.document.file_id}`;
-
-    // ================= 查找或创建群话题 =================
-    let topicId;
-
-    if (pool) {
-      const topicRes = await pool.query(`SELECT topic_id FROM topics WHERE customer_id = $1`, [customerId]);
-      if (topicRes.rowCount === 0) {
-        try {
-          const topicTitle = `客户: ${customerName} (${customerId})`;
-          const createTopic = await axios.post(
-            `https://api.telegram.org/bot${BOT_TOKEN}/createForumTopic`,
-            { chat_id: GROUP_CHAT_ID, name: topicTitle }
-          );
-
-          topicId = createTopic.data.result.message_thread_id;
-
-          await pool.query(
-            `INSERT INTO topics (customer_id, topic_id) VALUES ($1, $2)`,
-            [customerId, topicId]
-          );
-        } catch (err) {
-          console.error("❌ 创建话题失败:", err.response?.data || err.message);
-          return;
-        }
-      } else {
-        topicId = topicRes.rows[0].topic_id;
-      }
-
-      await pool.query(
-        `INSERT INTO messages (update_id, customer_id, customer_name, chat_type, message_type, content, topic_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [update.update_id, customerId, customerName, msg.chat.type, msgType, content, topicId]
+    const res = await client.query(
+      "SELECT * FROM users WHERE telegram_id=$1",
+      [telegramId]
+    );
+    if (res.rows.length === 0) {
+      await client.query(
+        "INSERT INTO users (telegram_id, name) VALUES ($1, $2)",
+        [telegramId, name]
       );
     }
-
-    // ================= 转发到群话题 =================
-    if (!topicId) {
-      console.error("❌ topicId 未生成，跳过消息转发");
-      return;
-    }
-
-    try {
-      await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        chat_id: GROUP_CHAT_ID,
-        message_thread_id: topicId,
-        text: content
-      });
-    } catch (err) {
-      console.error("❌ 转发消息到群话题失败:", err.response?.data || err.message);
-    }
-
-  } catch (err) {
-    console.error("❌ Webhook处理错误:", err.response?.data || err.message || err);
+  } finally {
+    client.release();
   }
-});
+}
 
-// ================= 群消息 → 自动回客户 =================
-app.post("/group_webhook", async (req, res) => {
+async function createThread(userId, topicId) {
+  const client = await pool.connect();
   try {
-    const update = req.body;
-    res.sendStatus(200);
+    await client.query(
+      "INSERT INTO threads (user_id, topic_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+      [userId, topicId]
+    );
+  } finally {
+    client.release();
+  }
+}
 
-    if (!update.message) return;
-    const msg = update.message;
+async function getThreadUser(topicId) {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      "SELECT user_id FROM threads WHERE topic_id=$1",
+      [topicId]
+    );
+    if (res.rows.length === 0) return null;
+    return res.rows[0].user_id;
+  } finally {
+    client.release();
+  }
+}
 
-    if (msg.from.is_bot) return;
-    if (!msg.message_thread_id || !msg.text) return;
+async function saveMessage(threadId, sender, content, type, file_id = null) {
+  const client = await pool.connect();
+  try {
+    await client.query(
+      "INSERT INTO messages (thread_id, sender, content, type, file_id) VALUES ($1,$2,$3,$4,$5)",
+      [threadId, sender, content, type, file_id]
+    );
+  } finally {
+    client.release();
+  }
+}
 
-    let customerId;
-    if (pool) {
-      const topicRes = await pool.query(`SELECT customer_id FROM topics WHERE topic_id = $1`, [msg.message_thread_id]);
-      if (topicRes.rowCount === 0) return;
-      customerId = topicRes.rows[0].customer_id;
+async function getThreadIdByTopic(topicId) {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      "SELECT id FROM threads WHERE topic_id=$1",
+      [topicId]
+    );
+    if (res.rows.length === 0) return null;
+    return res.rows[0].id;
+  } finally {
+    client.release();
+  }
+}
+
+// ================== Webhook 接口 ==================
+
+app.post("/webhook", async (req, res) => {
+  const message = req.body.message || req.body.edited_message;
+  if (!message) return res.sendStatus(200);
+
+  const chatId = message.chat.id;
+  const fromName = message.from?.first_name || "未知用户";
+
+  try {
+    // ===== 客户发消息给机器人 =====
+    if (message.chat.type === "private") {
+      await ensureUser(chatId, fromName);
+
+      let sentMessage;
+
+      // 文本消息
+      if (message.text) {
+        sentMessage = await bot.sendMessage(GROUP_CHAT_ID, `📨 来自 ${fromName} 的消息：\n${message.text}`, {
+          message_thread_id: undefined // 自动创建话题
+        });
+      }
+
+      // 图片消息
+      if (message.photo) {
+        const file_id = message.photo[message.photo.length - 1].file_id;
+        sentMessage = await bot.sendPhoto(GROUP_CHAT_ID, file_id, {
+          caption: `📸 来自 ${fromName} 的图片`,
+          message_thread_id: undefined
+        });
+      }
+
+      // 文件消息
+      if (message.document) {
+        const file_id = message.document.file_id;
+        sentMessage = await bot.sendDocument(GROUP_CHAT_ID, file_id, {
+          caption: `📄 来自 ${fromName} 的文件: ${message.document.file_name}`,
+          message_thread_id: undefined
+        });
+      }
+
+      // 语音消息
+      if (message.voice) {
+        const file_id = message.voice.file_id;
+        sentMessage = await bot.sendVoice(GROUP_CHAT_ID, file_id, {
+          caption: `🎤 来自 ${fromName} 的语音`,
+          message_thread_id: undefined
+        });
+      }
+
+      // 保存话题信息
+      await createThread(chatId, sentMessage.message_thread_id);
+      const threadId = await getThreadIdByTopic(sentMessage.message_thread_id);
+
+      // 保存消息记录
+      let type = message.text ? "text" : message.photo ? "photo" : message.document ? "document" : message.voice ? "voice" : "text";
+      let content = message.text || "";
+      let file_id = message.photo ? message.photo[message.photo.length - 1].file_id : message.document ? message.document.file_id : message.voice ? message.voice.file_id : null;
+
+      await saveMessage(threadId, "customer", content, type, file_id);
     }
 
-    if (!customerId) return;
+    // ===== 客服群话题消息 =====
+    if (chatId == GROUP_CHAT_ID && message.message_thread_id) {
+      const threadId = await getThreadIdByTopic(message.message_thread_id);
+      if (!threadId) return res.sendStatus(200);
 
-    try {
-      await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        chat_id: customerId,
-        text: `💬 客服回复:\n${msg.text}`
-      });
-    } catch (err) {
-      console.error("❌ 群消息转发给客户失败:", err.response?.data || err.message);
+      const userId = await getThreadUser(message.message_thread_id);
+      if (!userId) return res.sendStatus(200);
+
+      // 文本消息
+      if (message.text) {
+        await bot.sendMessage(userId, message.text);
+        await saveMessage(threadId, "agent", message.text, "text");
+      }
+
+      // 图片消息
+      if (message.photo) {
+        const file_id = message.photo[message.photo.length - 1].file_id;
+        await bot.sendPhoto(userId, file_id);
+        await saveMessage(threadId, "agent", "", "photo", file_id);
+      }
+
+      // 文件消息
+      if (message.document) {
+        const file_id = message.document.file_id;
+        await bot.sendDocument(userId, file_id);
+        await saveMessage(threadId, "agent", message.document.file_name, "document", file_id);
+      }
+
+      // 语音消息
+      if (message.voice) {
+        const file_id = message.voice.file_id;
+        await bot.sendVoice(userId, file_id);
+        await saveMessage(threadId, "agent", "", "voice", file_id);
+      }
     }
 
   } catch (err) {
-    console.error("❌ Group webhook处理错误:", err.response?.data || err.message || err);
+    console.error("处理消息错误:", err);
   }
+
+  res.sendStatus(200);
 });
 
-// ================= 启动 =================
-app.listen(PORT, "0.0.0.0", () => {
-  console.log("Bot running on port", PORT);
-});
+// ================== 启动服务 ==================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
