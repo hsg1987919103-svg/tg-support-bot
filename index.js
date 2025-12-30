@@ -6,178 +6,135 @@ const { Pool } = pkg;
 const app = express();
 app.use(express.json());
 
-// ================== 配置 ==================
+// ================= 配置 =================
 const TOKEN = process.env.BOT_TOKEN;
 const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID;
-const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const API = `https://api.telegram.org/bot${TOKEN}`;
+const PORT = process.env.PORT || 3000;
+const TG_API = `https://api.telegram.org/bot${TOKEN}`;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-// ================== 初始化数据库 ==================
-async function initDB() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS customers (
-      customer_id BIGINT PRIMARY KEY,
-      topic_id BIGINT NOT NULL
-    );
-  `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS messages (
-      customer_msg_id BIGINT,
-      group_msg_id BIGINT,
-      customer_id BIGINT,
-      PRIMARY KEY (customer_msg_id, customer_id)
-    );
-  `);
-
-  console.log("🗄️ PostgreSQL 已初始化");
+// ================= 工具函数 =================
+async function tg(method, data) {
+  return axios.post(`${TG_API}/${method}`, data);
 }
-initDB();
 
-// ================== Webhook ==================
-async function setWebhook() {
-  await axios.get(`${API}/setWebhook`, {
-    params: { url: WEBHOOK_URL },
-  });
-  console.log("✅ Webhook 设置成功");
-}
-setWebhook();
-
-// ================== 获取或创建窗口 ==================
-async function getOrCreateTopic(customerId) {
-  const res = await pool.query(
-    "SELECT topic_id FROM customers WHERE customer_id=$1",
-    [customerId]
+async function getOrCreateSession(chatId) {
+  const { rows } = await pool.query(
+    "SELECT * FROM sessions WHERE customer_chat_id=$1",
+    [chatId]
   );
-  if (res.rows.length) return res.rows[0].topic_id;
 
-  const topic = await axios.post(`${API}/createForumTopic`, {
+  if (rows.length) return rows[0];
+
+  const topic = await tg("createForumTopic", {
     chat_id: GROUP_CHAT_ID,
-    name: `客户 ${customerId}`,
+    name: `客户 ${chatId}`,
   });
 
   const topicId = topic.data.result.message_thread_id;
 
-  await pool.query(
-    "INSERT INTO customers (customer_id, topic_id) VALUES ($1,$2)",
-    [customerId, topicId]
+  const insert = await pool.query(
+    "INSERT INTO sessions (customer_chat_id, topic_id) VALUES ($1,$2) RETURNING *",
+    [chatId, topicId]
   );
 
-  return topicId;
+  return insert.rows[0];
 }
 
-// ================== Webhook 处理 ==================
+async function saveMessage(sessionId, sender, type, content) {
+  await pool.query(
+    "INSERT INTO messages (session_id, sender, message_type, content) VALUES ($1,$2,$3,$4)",
+    [sessionId, sender, type, content]
+  );
+}
+
+async function forwardToGroup(session, msg) {
+  const base = {
+    chat_id: GROUP_CHAT_ID,
+    message_thread_id: session.topic_id,
+  };
+
+  if (msg.text) {
+    await tg("sendMessage", { ...base, text: msg.text });
+    await saveMessage(session.id, "customer", "text", msg.text);
+  } else if (msg.photo) {
+    const file = msg.photo.at(-1).file_id;
+    await tg("sendPhoto", { ...base, photo: file, caption: msg.caption });
+    await saveMessage(session.id, "customer", "photo", file);
+  } else if (msg.voice) {
+    await tg("sendVoice", { ...base, voice: msg.voice.file_id });
+    await saveMessage(session.id, "customer", "voice", msg.voice.file_id);
+  } else if (msg.document) {
+    await tg("sendDocument", { ...base, document: msg.document.file_id });
+    await saveMessage(session.id, "customer", "document", msg.document.file_id);
+  } else if (msg.video) {
+    await tg("sendVideo", { ...base, video: msg.video.file_id });
+    await saveMessage(session.id, "customer", "video", msg.video.file_id);
+  }
+}
+
+async function forwardToCustomer(session, msg) {
+  const base = { chat_id: session.customer_chat_id };
+
+  if (msg.text) {
+    await tg("sendMessage", { ...base, text: msg.text });
+    await saveMessage(session.id, "agent", "text", msg.text);
+  } else if (msg.photo) {
+    await tg("sendPhoto", {
+      ...base,
+      photo: msg.photo.at(-1).file_id,
+      caption: msg.caption,
+    });
+    await saveMessage(session.id, "agent", "photo", msg.photo.at(-1).file_id);
+  } else if (msg.voice) {
+    await tg("sendVoice", { ...base, voice: msg.voice.file_id });
+    await saveMessage(session.id, "agent", "voice", msg.voice.file_id);
+  } else if (msg.document) {
+    await tg("sendDocument", { ...base, document: msg.document.file_id });
+    await saveMessage(session.id, "agent", "document", msg.document.file_id);
+  } else if (msg.video) {
+    await tg("sendVideo", { ...base, video: msg.video.file_id });
+    await saveMessage(session.id, "agent", "video", msg.video.file_id);
+  }
+}
+
+// ================= Webhook =================
 app.post("/webhook", async (req, res) => {
   const msg = req.body.message;
   if (!msg) return res.sendStatus(200);
 
-  // ========= 客户私聊 =========
-  if (msg.chat.type === "private") {
-    const customerId = msg.from.id;
-
-    try {
-      const topicId = await getOrCreateTopic(customerId);
-
-      // 首次欢迎
-      await axios.post(`${API}/sendMessage`, {
-        chat_id: customerId,
-        text: "Hola 👋，已为你接入客服，请稍等。",
-      });
-
-      // 转发文本
-      if (msg.text) {
-        const sent = await axios.post(`${API}/sendMessage`, {
-          chat_id: GROUP_CHAT_ID,
-          message_thread_id: topicId,
-          text: msg.text,
-        });
-
-        await pool.query(
-          "INSERT INTO messages VALUES ($1,$2,$3)",
-          [msg.message_id, sent.data.result.message_id, customerId]
-        );
-      }
-
-      // 转发图片
-      if (msg.photo) {
-        const fileId = msg.photo.at(-1).file_id;
-        await axios.post(`${API}/sendPhoto`, {
-          chat_id: GROUP_CHAT_ID,
-          message_thread_id: topicId,
-          photo: fileId,
-        });
-      }
-    } catch (e) {
-      console.error("❌ 客户消息失败", e.message);
+  try {
+    // 客户私聊
+    if (msg.chat.type === "private") {
+      const session = await getOrCreateSession(msg.chat.id);
+      await forwardToGroup(session, msg);
     }
-    return res.sendStatus(200);
-  }
 
-  // ========= 客服群 =========
-  if (
-    msg.chat.type === "supergroup" &&
-    String(msg.chat.id) === GROUP_CHAT_ID &&
-    msg.message_thread_id &&
-    !msg.from.is_bot
-  ) {
-    try {
-      const topicId = msg.message_thread_id;
-      const r = await pool.query(
-        "SELECT customer_id FROM customers WHERE topic_id=$1",
-        [topicId]
+    // 客服群话题回复
+    if (
+      msg.chat.id.toString() === GROUP_CHAT_ID &&
+      msg.message_thread_id
+    ) {
+      const { rows } = await pool.query(
+        "SELECT * FROM sessions WHERE topic_id=$1",
+        [msg.message_thread_id]
       );
-      if (!r.rows.length) return res.sendStatus(200);
 
-      const customerId = r.rows[0].customer_id;
-
-      // 引用回复
-      if (msg.reply_to_message) {
-        const m = await pool.query(
-          "SELECT customer_msg_id FROM messages WHERE group_msg_id=$1",
-          [msg.reply_to_message.message_id]
-        );
-
-        if (m.rows.length) {
-          await axios.post(`${API}/sendMessage`, {
-            chat_id: customerId,
-            text: msg.text,
-            reply_to_message_id: m.rows[0].customer_msg_id,
-          });
-          return res.sendStatus(200);
-        }
+      if (rows.length) {
+        await forwardToCustomer(rows[0], msg);
       }
-
-      // 普通回复
-      if (msg.text) {
-        await axios.post(`${API}/sendMessage`, {
-          chat_id: customerId,
-          text: msg.text,
-        });
-      }
-
-      if (msg.photo) {
-        const fileId = msg.photo.at(-1).file_id;
-        await axios.post(`${API}/sendPhoto`, {
-          chat_id: customerId,
-          photo: fileId,
-          caption: msg.caption || "",
-        });
-      }
-    } catch (e) {
-      console.error("❌ 客服回复失败", e.message);
     }
-    return res.sendStatus(200);
+  } catch (e) {
+    console.error(e.message);
   }
 
   res.sendStatus(200);
 });
 
-// ================== 启动 ==================
-app.listen(process.env.PORT || 3000, () => {
-  console.log("🚀 Bot 已启动（PostgreSQL 版）");
+app.listen(PORT, () => {
+  console.log("Bot running on port", PORT);
 });
