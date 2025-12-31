@@ -23,6 +23,7 @@ console.log("Webhook URL:", WEBHOOK_URL);
 
 // ================== 数据管理 ==================
 const chatHistory = {};        // 保存客户消息历史
+const userTopics = {};         // 客户ID -> 子话题ID
 const greetedUsers = new Set(); // 已回复 /start 的用户
 
 // ================== 队列发送 ==================
@@ -48,13 +49,15 @@ function enqueueSend(method, payload) {
   sendQueue.push({ method, payload });
   if (sendQueue.length === 1) processQueue();
 }
-function sendMessage(chat_id, text, replyToMessageId = null) {
+function sendMessage(chat_id, text, replyToMessageId = null, topic_id = null) {
   if (!text || !text.trim()) return;
   const payload = { chat_id, text, reply_to_message_id: replyToMessageId || undefined };
+  if (topic_id) payload.message_thread_id = topic_id;
   enqueueSend("sendMessage", payload);
 }
-function sendFile(chat_id, type, file_id, replyToMessageId = null) {
+function sendFile(chat_id, type, file_id, replyToMessageId = null, topic_id = null) {
   const payload = { chat_id, [`${type.toLowerCase()}`]: file_id, reply_to_message_id: replyToMessageId || undefined };
+  if (topic_id) payload.message_thread_id = topic_id;
   enqueueSend(`send${type}`, payload);
 }
 function saveMessage(userId, message) {
@@ -78,6 +81,23 @@ app.post("/webhook", async (req, res) => {
         greetedUsers.add(userId);
       }
 
+      // 自动创建独立聊天窗口（子话题）
+      if (!userTopics[userId]) {
+        try {
+          const topicRes = await axios.post(`${TELEGRAM_API}/createForumTopic`, null, {
+            params: { chat_id: GROUP_CHAT_ID, name: `聊天窗口 ${userId}` }
+          });
+          if (topicRes.data.ok) {
+            userTopics[userId] = topicRes.data.result.message_thread_id;
+            console.log(`[话题创建成功] 用户 ${userId} -> 话题ID ${userTopics[userId]}`);
+          } else {
+            console.warn("[话题创建失败]", topicRes.data);
+          }
+        } catch (err) {
+          console.warn("[话题创建异常]", err.response?.data || err.message);
+        }
+      }
+
       // 保存消息
       let savedMessage = { from: "user", type: "text", message: msg.text };
       if (msg.text) savedMessage.type = "text";
@@ -86,32 +106,21 @@ app.post("/webhook", async (req, res) => {
       else if (msg.document) { savedMessage.type = "Document"; savedMessage.file_id = msg.document.file_id; }
       saveMessage(userId, savedMessage);
 
-      // 转发到客服群，隐藏 ID/用户名
-      if (savedMessage.type === "text") sendMessage(GROUP_CHAT_ID, savedMessage.message);
-      else sendFile(GROUP_CHAT_ID, savedMessage.type, savedMessage.file_id);
+      // 转发到客服群子话题，隐藏 ID/用户名
+      const topicId = userTopics[userId];
+      if (savedMessage.type === "text") sendMessage(GROUP_CHAT_ID, savedMessage.message, null, topicId);
+      else sendFile(GROUP_CHAT_ID, savedMessage.type, savedMessage.file_id, null, topicId);
     }
 
     // -------- 客服消息 --------
     if (update.message && update.message.chat.id === GROUP_CHAT_ID) {
       const msg = update.message;
-      let replyToUserId = null;
+      const topicId = msg.message_thread_id;
+      if (!topicId) return res.sendStatus(200);
 
-      // 判断是否引用客户消息
-      if (msg.reply_to_message) {
-        const repliedText = msg.reply_to_message.text;
-        for (let uid in chatHistory) {
-          if (chatHistory[uid].some(m => m.message === repliedText && m.from === "user")) {
-            replyToUserId = uid;
-            break;
-          }
-        }
-      } else {
-        // 默认使用最后一条客户消息的用户
-        const allUsers = Object.keys(chatHistory);
-        if (allUsers.length) replyToUserId = allUsers[allUsers.length - 1];
-      }
-
-      if (!replyToUserId) return res.sendStatus(200);
+      // 根据话题找到用户ID
+      const userId = Object.keys(userTopics).find(k => userTopics[k] === topicId);
+      if (!userId) return res.sendStatus(200);
 
       let savedMessage = { from: "support", type: "text", message: msg.text };
       if (msg.text) savedMessage.type = "text";
@@ -119,11 +128,11 @@ app.post("/webhook", async (req, res) => {
       else if (msg.voice) { savedMessage.type = "Voice"; savedMessage.file_id = msg.voice.file_id; }
       else if (msg.document) { savedMessage.type = "Document"; savedMessage.file_id = msg.document.file_id; }
 
-      saveMessage(replyToUserId, savedMessage);
+      saveMessage(userId, savedMessage);
 
-      // 自动转发给客户，隐藏任何 ID/用户名
-      if (savedMessage.type === "text") sendMessage(replyToUserId, savedMessage.message);
-      else sendFile(replyToUserId, savedMessage.type, savedMessage.file_id);
+      // 自动转发给客户
+      if (savedMessage.type === "text") sendMessage(userId, savedMessage.message);
+      else sendFile(userId, savedMessage.type, savedMessage.file_id);
     }
 
     res.sendStatus(200);
