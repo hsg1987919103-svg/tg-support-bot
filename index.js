@@ -9,7 +9,7 @@ app.use(express.json());
 
 // ================== 配置 ==================
 const TOKEN = process.env.BOT_TOKEN;
-const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID); // 客服群ID
+const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID);
 const PORT = process.env.PORT || 3000;
 const DOMAIN = process.env.RAILWAY_STATIC_URL || `localhost:${PORT}`;
 const WEBHOOK_URL = `https://${DOMAIN}/webhook`;
@@ -18,8 +18,8 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
 console.log("Webhook URL:", WEBHOOK_URL);
 
 // ================== 消息历史 & 会话管理 ==================
-const chatHistory = {};  // { userId: [ {from,type,message,file_id,timestamp} ] }
-const userTopics = {};   // { userId: topic_id }
+const chatHistory = {};  
+const userTopics = {};  
 
 // ================== 队列与工具函数 ==================
 const sendQueue = [];
@@ -28,15 +28,16 @@ async function processQueue() {
   if (sendQueue.length === 0) return;
   const task = sendQueue.shift();
   try {
+    console.log("[队列发送] 方法:", task.method, "Payload:", task.payload);
     await axios.post(`${TELEGRAM_API}/${task.method}`, task.payload);
   } catch (err) {
     if (err.response && err.response.status === 429) {
       const retryAfter = err.response.data.parameters?.retry_after || 1;
-      console.warn(`429 Too Many Requests, retry after ${retryAfter}s`);
+      console.warn(`[429限流] 重试延迟 ${retryAfter} 秒`);
       sendQueue.unshift(task);
       await new Promise(r => setTimeout(r, retryAfter * 1000));
     } else {
-      console.error(err.message);
+      console.error("[发送失败]", err.response?.data || err.message);
     }
   }
   if (sendQueue.length > 0) setTimeout(processQueue, 500);
@@ -73,8 +74,9 @@ app.post("/webhook", async (req, res) => {
     if (update.message && update.message.chat && !update.message.chat.id === GROUP_CHAT_ID) {
       const msg = update.message;
       const userId = msg.from.id;
+      console.log("[用户消息] userId:", userId, "内容:", msg.text || "非文本消息");
 
-      // 如果该用户没有话题，创建新的会话窗口
+      // 创建话题窗口
       if (!userTopics[userId]) {
         try {
           const topicRes = await axios.post(`${TELEGRAM_API}/createForumTopic`, null, {
@@ -82,10 +84,10 @@ app.post("/webhook", async (req, res) => {
           });
           if (topicRes.data.ok) {
             userTopics[userId] = topicRes.data.result.message_thread_id;
-            console.log(`创建话题成功: 用户 ${userId}, topic_id=${userTopics[userId]}`);
+            console.log(`[话题创建成功] userId: ${userId}, topic_id: ${userTopics[userId]}`);
           }
         } catch (err) {
-          console.error("创建话题失败:", err.response?.data || err.message);
+          console.error("[话题创建失败]", err.response?.data || err.message);
         }
       }
 
@@ -105,7 +107,7 @@ app.post("/webhook", async (req, res) => {
 
       saveMessage(userId, savedMessage);
 
-      // 转发到客服群对应话题
+      // 转发到客服群话题
       const topicId = userTopics[userId];
       if (savedMessage.type === "text") sendMessage(GROUP_CHAT_ID, `用户 ${userId} 说:\n${savedMessage.message}`, null, topicId);
       else sendFile(GROUP_CHAT_ID, savedMessage.type, savedMessage.file_id, null, topicId);
@@ -117,9 +119,14 @@ app.post("/webhook", async (req, res) => {
       const topicId = msg.message_thread_id;
       if (!topicId) return res.sendStatus(200);
 
+      console.log("[客服消息] topic_id:", topicId, "内容:", msg.text || "非文本消息");
+
       // 找到对应用户
       const userId = Object.keys(userTopics).find(k => userTopics[k] === topicId);
-      if (!userId) return res.sendStatus(200);
+      if (!userId) {
+        console.warn("[未匹配用户] topic_id:", topicId);
+        return res.sendStatus(200);
+      }
 
       let savedMessage = { from: "support", type: "text", message: msg.text };
       if (msg.text) savedMessage.type = "text";
@@ -139,11 +146,13 @@ app.post("/webhook", async (req, res) => {
       // 自动转发给客户
       if (savedMessage.type === "text") sendMessage(userId, savedMessage.message);
       else sendFile(userId, savedMessage.type, savedMessage.file_id);
+
+      console.log(`[已转发给用户] userId: ${userId}, 类型: ${savedMessage.type}`);
     }
 
     res.sendStatus(200);
   } catch (err) {
-    console.error(err);
+    console.error("[Webhook异常]", err);
     res.sendStatus(500);
   }
 });
