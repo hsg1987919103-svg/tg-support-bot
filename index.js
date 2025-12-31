@@ -1,13 +1,18 @@
 import express from "express";
 import axios from "axios";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
 app.use(express.json());
 
 // ================== 配置 ==================
-const TOKEN = process.env.BOT_TOKEN; // 你的 Telegram Bot Token
-const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID; // 客服群聊 ID
-const WEBHOOK_URL = "https://tg-support-bot-production-6fe5.up.railway.app/webhook"; // 你的 Railway URL
+const TOKEN = process.env.BOT_TOKEN;
+const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID); // 转为数字
+const WEBHOOK_URL = `https://${process.env.WEBHOOK_URL}/webhook`;
+const PORT = process.env.PORT || 3000;
+
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
 
 // 内存存储聊天记录
@@ -73,7 +78,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     // ================== 群里客服回复 ==================
-    if (update.message && update.message.chat.id.toString() === GROUP_CHAT_ID) {
+    if (update.message && update.message.chat.id === GROUP_CHAT_ID) {
       const msg = update.message;
 
       if (msg.reply_to_message) {
@@ -115,14 +120,13 @@ app.post("/webhook", async (req, res) => {
 });
 
 // ================== 启动服务器 ==================
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`Telegram 支持机器人已启动，监听端口 ${PORT}`);
 
   // 自动设置 Webhook
   try {
     const res = await axios.post(
-      `https://api.telegram.org/bot${TOKEN}/setWebhook`,
+      `${TELEGRAM_API}/setWebhook`,
       {},
       { params: { url: WEBHOOK_URL } }
     );
@@ -132,6 +136,10 @@ app.listen(PORT, async () => {
       console.error("Webhook 设置失败:", res.data);
     }
   } catch (err) {
-    console.error("Webhook 设置异常:", err.message);
+    if (err.response) {
+      console.error("Webhook 设置失败:", err.response.data);
+    } else {
+      console.error("Webhook 设置异常:", err.message);
+    }
   }
 });
