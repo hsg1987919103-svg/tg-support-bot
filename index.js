@@ -10,7 +10,7 @@ app.use(express.json());
 // ================== 配置 ==================
 const TOKEN = process.env.BOT_TOKEN;
 const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID); // 转为数字
-const WEBHOOK_URL = `https://${process.env.WEBHOOK_URL}/webhook`;
+const WEBHOOK_URL = "https://tg-support-bot-production-8afa.up.railway.app/webhook"; // 固定 Webhook URL
 const PORT = process.env.PORT || 3000;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
@@ -45,16 +45,15 @@ app.post("/webhook", async (req, res) => {
   const update = req.body;
 
   try {
-    // ================== 客户消息 ==================
+    // 客户消息
     if (update.message && update.message.chat) {
       const msg = update.message;
       const fromUserId = msg.from.id;
 
       let savedMessage = { from: "user", type: "text", message: msg.text };
 
-      if (msg.text) {
-        savedMessage.type = "text";
-      } else if (msg.photo) {
+      if (msg.text) savedMessage.type = "text";
+      else if (msg.photo) {
         savedMessage.type = "Photo";
         savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id;
       } else if (msg.voice) {
@@ -68,29 +67,23 @@ app.post("/webhook", async (req, res) => {
       saveMessage(fromUserId, savedMessage);
 
       if (savedMessage.type === "text") {
-        await sendMessage(
-          GROUP_CHAT_ID,
-          `用户 ${fromUserId} 说:\n${savedMessage.message}`
-        );
+        await sendMessage(GROUP_CHAT_ID, `用户 ${fromUserId} 说:\n${savedMessage.message}`);
       } else {
         await sendFile(GROUP_CHAT_ID, savedMessage.type, savedMessage.file_id);
       }
     }
 
-    // ================== 群里客服回复 ==================
+    // 群客服回复
     if (update.message && update.message.chat.id === GROUP_CHAT_ID) {
       const msg = update.message;
-
       if (msg.reply_to_message) {
         const match = msg.reply_to_message.text?.match(/用户 (\d+) 说:/);
         if (match) {
           const userId = parseInt(match[1]);
-
           let savedMessage = { from: "support", type: "text", message: msg.text };
 
-          if (msg.text) {
-            savedMessage.type = "text";
-          } else if (msg.photo) {
+          if (msg.text) savedMessage.type = "text";
+          else if (msg.photo) {
             savedMessage.type = "Photo";
             savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id;
           } else if (msg.voice) {
@@ -119,27 +112,31 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+// ================== 手动重试 Webhook 设置接口 ==================
+app.get("/set-webhook", async (req, res) => {
+  try {
+    const webhookRes = await axios.post(`${TELEGRAM_API}/setWebhook`, {}, { params: { url: WEBHOOK_URL } });
+    res.json(webhookRes.data);
+  } catch (err) {
+    if (err.response) res.json(err.response.data);
+    else res.json({ ok: false, error: err.message });
+  }
+});
+
 // ================== 启动服务器 ==================
 app.listen(PORT, async () => {
   console.log(`Telegram 支持机器人已启动，监听端口 ${PORT}`);
 
-  // 自动设置 Webhook
   try {
-    const res = await axios.post(
-      `${TELEGRAM_API}/setWebhook`,
-      {},
-      { params: { url: WEBHOOK_URL } }
-    );
-    if (res.data.ok) {
-      console.log("Webhook 设置成功:", WEBHOOK_URL);
-    } else {
-      console.error("Webhook 设置失败:", res.data);
-    }
+    // 测试 WEBHOOK_URL 可访问性
+    const test = await axios.get(WEBHOOK_URL).catch(() => null);
+    if (!test) console.warn("Warning: WEBHOOK_URL 可能暂不可访问，Telegram 设置 Webhook 可能失败。");
+
+    const resWebhook = await axios.post(`${TELEGRAM_API}/setWebhook`, {}, { params: { url: WEBHOOK_URL } });
+    if (resWebhook.data.ok) console.log("Webhook 设置成功:", WEBHOOK_URL);
+    else console.error("Webhook 设置失败:", resWebhook.data);
   } catch (err) {
-    if (err.response) {
-      console.error("Webhook 设置失败:", err.response.data);
-    } else {
-      console.error("Webhook 设置异常:", err.message);
-    }
+    if (err.response) console.error("Webhook 设置失败:", err.response.data);
+    else console.error("Webhook 设置异常:", err.message);
   }
 });
