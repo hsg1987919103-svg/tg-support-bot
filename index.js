@@ -9,30 +9,49 @@ app.use(express.json());
 
 // ================== 配置 ==================
 const TOKEN = process.env.BOT_TOKEN;
-const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID); // 转为数字
-const WEBHOOK_URL = "https://tg-support-bot-production-8afa.up.railway.app/webhook"; // 固定 Webhook URL
+const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID);
+const WEBHOOK_URL = "https://tg-support-bot-production-8afa.up.railway.app/webhook";
 const PORT = process.env.PORT || 3000;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
-
-// 内存存储聊天记录
 const chatHistory = {};
 
-// ================== 工具函数 ==================
-async function sendMessage(chat_id, text, replyToMessageId = null) {
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
-    chat_id,
-    text,
-    reply_to_message_id: replyToMessageId || undefined,
-  });
+// ================== 队列与工具函数 ==================
+const sendQueue = [];
+
+async function processQueue() {
+  if (sendQueue.length === 0) return;
+  const task = sendQueue.shift();
+  try {
+    await axios.post(`${TELEGRAM_API}/${task.method}`, task.payload);
+  } catch (err) {
+    if (err.response && err.response.status === 429) {
+      const retryAfter = err.response.data.parameters?.retry_after || 1;
+      console.warn(`429 Too Many Requests, retry after ${retryAfter} seconds`);
+      // 重试前重新放回队列
+      sendQueue.unshift(task);
+      await new Promise(r => setTimeout(r, retryAfter * 1000));
+    } else {
+      console.error(err.message);
+    }
+  }
+  // 下一条消息间隔 0.5 秒
+  if (sendQueue.length > 0) {
+    setTimeout(processQueue, 500);
+  }
 }
 
-async function sendFile(chat_id, type, file_id, replyToMessageId = null) {
-  await axios.post(`${TELEGRAM_API}/send${type}`, {
-    chat_id,
-    [`${type.toLowerCase()}`]: file_id,
-    reply_to_message_id: replyToMessageId || undefined,
-  });
+function enqueueSend(method, payload) {
+  sendQueue.push({ method, payload });
+  if (sendQueue.length === 1) processQueue();
+}
+
+function sendMessage(chat_id, text, replyToMessageId = null) {
+  enqueueSend("sendMessage", { chat_id, text, reply_to_message_id: replyToMessageId || undefined });
+}
+
+function sendFile(chat_id, type, file_id, replyToMessageId = null) {
+  enqueueSend(`send${type}`, { chat_id, [`${type.toLowerCase()}`]: file_id, reply_to_message_id: replyToMessageId || undefined });
 }
 
 function saveMessage(userId, message) {
@@ -51,7 +70,6 @@ app.post("/webhook", async (req, res) => {
       const fromUserId = msg.from.id;
 
       let savedMessage = { from: "user", type: "text", message: msg.text };
-
       if (msg.text) savedMessage.type = "text";
       else if (msg.photo) {
         savedMessage.type = "Photo";
@@ -67,9 +85,9 @@ app.post("/webhook", async (req, res) => {
       saveMessage(fromUserId, savedMessage);
 
       if (savedMessage.type === "text") {
-        await sendMessage(GROUP_CHAT_ID, `用户 ${fromUserId} 说:\n${savedMessage.message}`);
+        sendMessage(GROUP_CHAT_ID, `用户 ${fromUserId} 说:\n${savedMessage.message}`);
       } else {
-        await sendFile(GROUP_CHAT_ID, savedMessage.type, savedMessage.file_id);
+        sendFile(GROUP_CHAT_ID, savedMessage.type, savedMessage.file_id);
       }
     }
 
@@ -97,9 +115,9 @@ app.post("/webhook", async (req, res) => {
           saveMessage(userId, savedMessage);
 
           if (savedMessage.type === "text") {
-            await sendMessage(userId, savedMessage.message);
+            sendMessage(userId, savedMessage.message);
           } else {
-            await sendFile(userId, savedMessage.type, savedMessage.file_id);
+            sendFile(userId, savedMessage.type, savedMessage.file_id);
           }
         }
       }
@@ -128,7 +146,6 @@ app.listen(PORT, async () => {
   console.log(`Telegram 支持机器人已启动，监听端口 ${PORT}`);
 
   try {
-    // 测试 WEBHOOK_URL 可访问性
     const test = await axios.get(WEBHOOK_URL).catch(() => null);
     if (!test) console.warn("Warning: WEBHOOK_URL 可能暂不可访问，Telegram 设置 Webhook 可能失败。");
 
