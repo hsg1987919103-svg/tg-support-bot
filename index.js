@@ -157,7 +157,7 @@ app.get("/set-webhook", async (req, res) => {
     const webhookRes = await axios.post(`${TELEGRAM_API}/setWebhook`, null, { params: { url: WEBHOOK_URL } });
     res.json(webhookRes.data);
   } catch (err) {
-    console.error("[手动设置Webhook异常]", err.response?.data || err.message);
+    console.warn("[手动设置Webhook异常，不影响使用]", err.response?.data || err.message);
     res.json({ ok: false, error: err.response?.data || err.message });
   }
 });
@@ -170,8 +170,8 @@ app.listen(PORT, async () => {
   try {
     const resWebhook = await axios.post(`${TELEGRAM_API}/setWebhook`, null, { params: { url: WEBHOOK_URL } });
     if (resWebhook.data.ok) console.log("Webhook 设置成功:", WEBHOOK_URL);
-    else console.error("[Webhook设置失败]", resWebhook.data);
+    else console.warn("[Webhook设置返回非 ok]", resWebhook.data);
   } catch (err) {
-    console.error("[自动设置Webhook异常]", err.response?.data || err.message);
+    console.warn("[自动设置Webhook异常，不影响使用]", err.response?.data || err.message);
   }
 });
