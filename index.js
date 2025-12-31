@@ -11,8 +11,6 @@ app.use(express.json());
 const TOKEN = process.env.BOT_TOKEN;
 const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID);
 const PORT = process.env.PORT || 3000;
-
-// 使用 .env 中的 WEBHOOK_URL
 const WEBHOOK_URL = process.env.WEBHOOK_URL || `https://${process.env.RAILWAY_STATIC_URL || 'localhost:' + PORT}/webhook`;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
@@ -51,6 +49,7 @@ function enqueueSend(method, payload) {
 }
 
 function sendMessage(chat_id, text, replyToMessageId = null, topic_id = null) {
+  if (!text || !text.trim()) return; // 避免空文本发送
   const payload = { chat_id, text, reply_to_message_id: replyToMessageId || undefined };
   if (topic_id) payload.message_thread_id = topic_id;
   enqueueSend("sendMessage", payload);
@@ -133,7 +132,10 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ================== 手动重试 Webhook ==================
+// ================== 健康检查接口 ==================
+app.get("/health", (req, res) => res.send("ok"));
+
+// ================== 手动设置 Webhook ==================
 app.get("/set-webhook", async (req, res) => {
   try {
     const webhookRes = await axios.post(`${TELEGRAM_API}/setWebhook`, null, { params: { url: WEBHOOK_URL } });
@@ -144,19 +146,16 @@ app.get("/set-webhook", async (req, res) => {
   }
 });
 
-// ================== 启动服务器并设置 Webhook ==================
+// ================== 启动服务器 ==================
 app.listen(PORT, async () => {
   console.log(`Telegram 支持机器人已启动，监听端口 ${PORT}`);
 
+  // 自动设置 Webhook
   try {
-    // 检测 Webhook URL 可达性（GET 请求）
-    await axios.get(WEBHOOK_URL, { timeout: 5000 });
-    console.log("[Webhook URL 可达] 开始设置 Telegram Webhook");
-
     const resWebhook = await axios.post(`${TELEGRAM_API}/setWebhook`, null, { params: { url: WEBHOOK_URL } });
     if (resWebhook.data.ok) console.log("Webhook 设置成功:", WEBHOOK_URL);
     else console.error("Webhook 设置失败:", resWebhook.data);
   } catch (err) {
-    console.error("[Webhook URL 不可达或设置失败]", err.response?.data || err.message);
+    console.error("[自动设置Webhook异常]", err.response?.data || err.message);
   }
 });
