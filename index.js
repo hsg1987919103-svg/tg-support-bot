@@ -9,7 +9,7 @@ app.use(express.json());
 
 // ================== 配置 ==================
 const TOKEN = process.env.BOT_TOKEN;
-const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID); // 客服群ID
+const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID);
 const PORT = process.env.PORT || 3000;
 
 let WEBHOOK_URL = process.env.WEBHOOK_URL;
@@ -17,16 +17,18 @@ if (!WEBHOOK_URL.startsWith("https://")) WEBHOOK_URL = "https://" + WEBHOOK_URL;
 if (!WEBHOOK_URL.endsWith("/webhook")) WEBHOOK_URL += "/webhook";
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
+
 console.log("BOT_TOKEN:", TOKEN ? TOKEN.substring(0, 8) + "..." : "未设置");
 console.log("Webhook URL:", WEBHOOK_URL);
 
 // ================== 数据管理 ==================
-const chatHistory = {};        // 保存客户消息历史
-const userTopics = {};         // 客户ID -> 子话题ID
-const greetedUsers = new Set(); // 已回复 /start 的用户
+const chatHistory = {};     // 保存客户消息
+const userTopics = {};      // 用户ID -> 话题ID
+const greetedUsers = new Set(); // 已自动问候用户
 
 // ================== 队列发送 ==================
 const sendQueue = [];
+
 async function processQueue() {
   if (!sendQueue.length) return;
   const task = sendQueue.shift();
@@ -35,42 +37,46 @@ async function processQueue() {
   } catch (err) {
     if (err.response && err.response.status === 429) {
       const retryAfter = err.response.data.parameters?.retry_after || 1;
-      console.warn(`[429限流] 重试延迟 ${retryAfter} 秒`);
+      console.warn(`[429限流] 延迟 ${retryAfter}s 重试`);
       sendQueue.unshift(task);
       await new Promise(r => setTimeout(r, retryAfter * 1000));
     } else {
       console.warn("[发送失败]", err.response?.data || err.message);
     }
   }
-  if (sendQueue.length > 0) setTimeout(processQueue, 500);
+  if (sendQueue.length) setTimeout(processQueue, 500);
 }
+
 function enqueueSend(method, payload) {
   sendQueue.push({ method, payload });
   if (sendQueue.length === 1) processQueue();
 }
+
 function sendMessage(chat_id, text, replyToMessageId = null, topic_id = null) {
   if (!text || !text.trim()) return;
   const payload = { chat_id, text, reply_to_message_id: replyToMessageId || undefined };
   if (topic_id) payload.message_thread_id = topic_id;
   enqueueSend("sendMessage", payload);
 }
+
 function sendFile(chat_id, type, file_id, replyToMessageId = null, topic_id = null) {
   const payload = { chat_id, [`${type.toLowerCase()}`]: file_id, reply_to_message_id: replyToMessageId || undefined };
   if (topic_id) payload.message_thread_id = topic_id;
   enqueueSend(`send${type}`, payload);
 }
+
 function saveMessage(userId, message) {
   if (!chatHistory[userId]) chatHistory[userId] = [];
   chatHistory[userId].push({ ...message, timestamp: new Date() });
 }
 
-// ================== Webhook ==================
+// ================== Webhook 接收 ==================
 app.post("/webhook", async (req, res) => {
   const update = req.body;
 
   try {
-    // -------- 客户消息 --------
-    if (update.message && update.message.chat.id !== GROUP_CHAT_ID) {
+    // ------------------ 客户发消息 ------------------
+    if (update.message && update.message.chat && update.message.chat.id !== GROUP_CHAT_ID) {
       const msg = update.message;
       const userId = msg.from.id;
 
@@ -80,44 +86,39 @@ app.post("/webhook", async (req, res) => {
         greetedUsers.add(userId);
       }
 
-      // 自动创建独立聊天窗口（子话题）
+      // 自动创建聊天窗口
       if (!userTopics[userId]) {
         try {
           const topicRes = await axios.post(`${TELEGRAM_API}/createForumTopic`, null, {
-            params: { chat_id: GROUP_CHAT_ID, name: `聊天窗口 ${userId}` }
+            params: { chat_id: GROUP_CHAT_ID, name: `聊天窗口` }
           });
-          if (topicRes.data.ok) {
-            userTopics[userId] = topicRes.data.result.message_thread_id;
-            console.log(`[话题创建成功] 用户 ${userId} -> 话题ID ${userTopics[userId]}`);
-          } else {
-            console.warn("[话题创建失败]", topicRes.data);
-          }
+          if (topicRes.data.ok) userTopics[userId] = topicRes.data.result.message_thread_id;
         } catch (err) {
           console.warn("[话题创建异常]", err.response?.data || err.message);
         }
       }
 
       // 保存消息
-      let savedMessage = { from: "user", type: "text", message: msg.text, message_id: msg.message_id };
+      let savedMessage = { from: "user", type: "text", message: msg.text };
       if (msg.text) savedMessage.type = "text";
-      else if (msg.photo) { savedMessage.type = "Photo"; savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id; savedMessage.message_id = msg.message_id; }
-      else if (msg.voice) { savedMessage.type = "Voice"; savedMessage.file_id = msg.voice.file_id; savedMessage.message_id = msg.message_id; }
-      else if (msg.document) { savedMessage.type = "Document"; savedMessage.file_id = msg.document.file_id; savedMessage.message_id = msg.message_id; }
+      else if (msg.photo) { savedMessage.type = "Photo"; savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id; }
+      else if (msg.voice) { savedMessage.type = "Voice"; savedMessage.file_id = msg.voice.file_id; }
+      else if (msg.document) { savedMessage.type = "Document"; savedMessage.file_id = msg.document.file_id; }
+
       saveMessage(userId, savedMessage);
 
-      // 转发到客服群子话题，隐藏 ID/用户名
+      // 转发到客服群话题（内容不显示ID/用户名）
       const topicId = userTopics[userId];
       if (savedMessage.type === "text") sendMessage(GROUP_CHAT_ID, savedMessage.message, null, topicId);
       else sendFile(GROUP_CHAT_ID, savedMessage.type, savedMessage.file_id, null, topicId);
     }
 
-    // -------- 客服消息（支持引用客户消息）--------
+    // ------------------ 客服在群话题回复 ------------------
     if (update.message && update.message.chat.id === GROUP_CHAT_ID) {
       const msg = update.message;
       const topicId = msg.message_thread_id;
       if (!topicId) return res.sendStatus(200);
 
-      // 根据话题找到用户ID
       const userId = Object.keys(userTopics).find(k => userTopics[k] === topicId);
       if (!userId) return res.sendStatus(200);
 
@@ -129,18 +130,9 @@ app.post("/webhook", async (req, res) => {
 
       saveMessage(userId, savedMessage);
 
-      // 支持客服引用客户消息回复
-      let replyTo = null;
-      if (msg.reply_to_message) {
-        const history = chatHistory[userId];
-        // 找到被引用的客户消息
-        const replied = history.find(m => m.message_id === msg.reply_to_message.message_id && m.from === "user");
-        if (replied) replyTo = replied.message_id;
-      }
-
       // 自动转发给客户
-      if (savedMessage.type === "text") sendMessage(userId, savedMessage.message, replyTo);
-      else sendFile(userId, savedMessage.type, savedMessage.file_id, replyTo);
+      if (savedMessage.type === "text") sendMessage(userId, savedMessage.message);
+      else sendFile(userId, savedMessage.type, savedMessage.file_id);
     }
 
     res.sendStatus(200);
@@ -164,10 +156,9 @@ app.get("/set-webhook", async (req, res) => {
   }
 });
 
-// ================== 启动 ==================
+// ================== 启动服务器 ==================
 app.listen(PORT, async () => {
   console.log(`Telegram 支持机器人已启动，监听端口 ${PORT}`);
-
   try {
     const resWebhook = await axios.post(`${TELEGRAM_API}/setWebhook`, null, { params: { url: WEBHOOK_URL } });
     if (resWebhook.data.ok) console.log("Webhook 设置成功:", WEBHOOK_URL);
