@@ -10,10 +10,17 @@ app.use(express.json());
 // ================== 配置 ==================
 const TOKEN = process.env.BOT_TOKEN;
 const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID);
-const WEBHOOK_URL = "https://tg-support-bot-production-8afa.up.railway.app/webhook";
-const PORT = process.env.PORT || 3000;
 
+// 自动生成 Webhook URL
+const DOMAIN = process.env.RAILWAY_STATIC_URL || `localhost:${process.env.PORT || 3000}`;
+const WEBHOOK_URL = `https://${DOMAIN}/webhook`;
+
+console.log("Webhook URL:", WEBHOOK_URL);
+
+const PORT = process.env.PORT || 3000;
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
+
+// ================== 消息历史存储 ==================
 const chatHistory = {};
 
 // ================== 队列与工具函数 ==================
@@ -28,14 +35,12 @@ async function processQueue() {
     if (err.response && err.response.status === 429) {
       const retryAfter = err.response.data.parameters?.retry_after || 1;
       console.warn(`429 Too Many Requests, retry after ${retryAfter} seconds`);
-      // 重试前重新放回队列
       sendQueue.unshift(task);
       await new Promise(r => setTimeout(r, retryAfter * 1000));
     } else {
       console.error(err.message);
     }
   }
-  // 下一条消息间隔 0.5 秒
   if (sendQueue.length > 0) {
     setTimeout(processQueue, 500);
   }
@@ -95,7 +100,7 @@ app.post("/webhook", async (req, res) => {
     if (update.message && update.message.chat.id === GROUP_CHAT_ID) {
       const msg = update.message;
       if (msg.reply_to_message) {
-        const match = msg.reply_to_message.text?.match(/用户 (\d+) 说:/);
+        const match = msg.reply_to_message.text?.match(/^用户 (\d+) 说:/);
         if (match) {
           const userId = parseInt(match[1]);
           let savedMessage = { from: "support", type: "text", message: msg.text };
@@ -141,14 +146,11 @@ app.get("/set-webhook", async (req, res) => {
   }
 });
 
-// ================== 启动服务器 ==================
+// ================== 启动服务器并设置 Webhook ==================
 app.listen(PORT, async () => {
   console.log(`Telegram 支持机器人已启动，监听端口 ${PORT}`);
 
   try {
-    const test = await axios.get(WEBHOOK_URL).catch(() => null);
-    if (!test) console.warn("Warning: WEBHOOK_URL 可能暂不可访问，Telegram 设置 Webhook 可能失败。");
-
     const resWebhook = await axios.post(`${TELEGRAM_API}/setWebhook`, {}, { params: { url: WEBHOOK_URL } });
     if (resWebhook.data.ok) console.log("Webhook 设置成功:", WEBHOOK_URL);
     else console.error("Webhook 设置失败:", resWebhook.data);
