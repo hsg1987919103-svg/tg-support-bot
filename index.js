@@ -9,19 +9,18 @@ app.use(express.json());
 
 // ================== 配置 ==================
 const TOKEN = process.env.BOT_TOKEN;
-const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID);
-
-// 自动生成 Webhook URL
+const SUPPORT_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID); // 客服群组ID
 const DOMAIN = process.env.RAILWAY_STATIC_URL || `localhost:${process.env.PORT || 3000}`;
 const WEBHOOK_URL = `https://${DOMAIN}/webhook`;
-
-console.log("Webhook URL:", WEBHOOK_URL);
 
 const PORT = process.env.PORT || 3000;
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
 
-// ================== 消息历史存储 ==================
-const chatHistory = {};
+console.log("Webhook URL:", WEBHOOK_URL);
+
+// ================== 消息历史和会话管理 ==================
+const chatHistory = {}; // { userId: [{from: 'user'|'support', type, message, file_id, timestamp}] }
+const userTopics = {};  // { userId: topic_id }  // 存储用户对应的群组话题ID
 
 // ================== 队列与工具函数 ==================
 const sendQueue = [];
@@ -41,9 +40,7 @@ async function processQueue() {
       console.error(err.message);
     }
   }
-  if (sendQueue.length > 0) {
-    setTimeout(processQueue, 500);
-  }
+  if (sendQueue.length > 0) setTimeout(processQueue, 500);
 }
 
 function enqueueSend(method, payload) {
@@ -51,12 +48,16 @@ function enqueueSend(method, payload) {
   if (sendQueue.length === 1) processQueue();
 }
 
-function sendMessage(chat_id, text, replyToMessageId = null) {
-  enqueueSend("sendMessage", { chat_id, text, reply_to_message_id: replyToMessageId || undefined });
+function sendMessage(chat_id, text, replyToMessageId = null, topic_id = null) {
+  const payload = { chat_id, text, reply_to_message_id: replyToMessageId || undefined };
+  if (topic_id) payload.message_thread_id = topic_id;
+  enqueueSend("sendMessage", payload);
 }
 
-function sendFile(chat_id, type, file_id, replyToMessageId = null) {
-  enqueueSend(`send${type}`, { chat_id, [`${type.toLowerCase()}`]: file_id, reply_to_message_id: replyToMessageId || undefined });
+function sendFile(chat_id, type, file_id, replyToMessageId = null, topic_id = null) {
+  const payload = { chat_id, [`${type.toLowerCase()}`]: file_id, reply_to_message_id: replyToMessageId || undefined };
+  if (topic_id) payload.message_thread_id = topic_id;
+  enqueueSend(`send${type}`, payload);
 }
 
 function saveMessage(userId, message) {
@@ -69,10 +70,22 @@ app.post("/webhook", async (req, res) => {
   const update = req.body;
 
   try {
-    // 客户消息
-    if (update.message && update.message.chat) {
+    // 用户发消息给机器人
+    if (update.message && update.message.chat && !update.message.chat.id === SUPPORT_CHAT_ID) {
       const msg = update.message;
-      const fromUserId = msg.from.id;
+      const userId = msg.from.id;
+
+      // 创建新的会话话题（如果还没有）
+      if (!userTopics[userId]) {
+        // 通过 Telegram API 创建话题（需群是讨论群）
+        const topicRes = await axios.post(`${TELEGRAM_API}/createForumTopic`, null, {
+          params: {
+            chat_id: SUPPORT_CHAT_ID,
+            name: `用户 ${userId} 会话`,
+          },
+        });
+        if (topicRes.data.ok) userTopics[userId] = topicRes.data.result.message_thread_id;
+      }
 
       let savedMessage = { from: "user", type: "text", message: msg.text };
       if (msg.text) savedMessage.type = "text";
@@ -87,45 +100,42 @@ app.post("/webhook", async (req, res) => {
         savedMessage.file_id = msg.document.file_id;
       }
 
-      saveMessage(fromUserId, savedMessage);
+      saveMessage(userId, savedMessage);
 
-      if (savedMessage.type === "text") {
-        sendMessage(GROUP_CHAT_ID, `用户 ${fromUserId} 说:\n${savedMessage.message}`);
-      } else {
-        sendFile(GROUP_CHAT_ID, savedMessage.type, savedMessage.file_id);
-      }
+      // 转发到客服群对应话题
+      const topicId = userTopics[userId];
+      if (savedMessage.type === "text") sendMessage(SUPPORT_CHAT_ID, `用户 ${userId} 说:\n${savedMessage.message}`, null, topicId);
+      else sendFile(SUPPORT_CHAT_ID, savedMessage.type, savedMessage.file_id, null, topicId);
     }
 
-    // 群客服回复
-    if (update.message && update.message.chat.id === GROUP_CHAT_ID) {
+    // 客服在群组话题回复
+    if (update.message && update.message.chat.id === SUPPORT_CHAT_ID) {
       const msg = update.message;
-      if (msg.reply_to_message) {
-        const match = msg.reply_to_message.text?.match(/^用户 (\d+) 说:/);
-        if (match) {
-          const userId = parseInt(match[1]);
-          let savedMessage = { from: "support", type: "text", message: msg.text };
+      const topicId = msg.message_thread_id;
+      if (!topicId) return res.sendStatus(200);
 
-          if (msg.text) savedMessage.type = "text";
-          else if (msg.photo) {
-            savedMessage.type = "Photo";
-            savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id;
-          } else if (msg.voice) {
-            savedMessage.type = "Voice";
-            savedMessage.file_id = msg.voice.file_id;
-          } else if (msg.document) {
-            savedMessage.type = "Document";
-            savedMessage.file_id = msg.document.file_id;
-          }
+      // 找到对应用户
+      const userId = Object.keys(userTopics).find(k => userTopics[k] === topicId);
+      if (!userId) return res.sendStatus(200);
 
-          saveMessage(userId, savedMessage);
-
-          if (savedMessage.type === "text") {
-            sendMessage(userId, savedMessage.message);
-          } else {
-            sendFile(userId, savedMessage.type, savedMessage.file_id);
-          }
-        }
+      let savedMessage = { from: "support", type: "text", message: msg.text };
+      if (msg.text) savedMessage.type = "text";
+      else if (msg.photo) {
+        savedMessage.type = "Photo";
+        savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id;
+      } else if (msg.voice) {
+        savedMessage.type = "Voice";
+        savedMessage.file_id = msg.voice.file_id;
+      } else if (msg.document) {
+        savedMessage.type = "Document";
+        savedMessage.file_id = msg.document.file_id;
       }
+
+      saveMessage(userId, savedMessage);
+
+      // 转发给用户
+      if (savedMessage.type === "text") sendMessage(userId, savedMessage.message);
+      else sendFile(userId, savedMessage.type, savedMessage.file_id);
     }
 
     res.sendStatus(200);
