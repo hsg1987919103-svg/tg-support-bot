@@ -25,6 +25,7 @@ console.log("Webhook URL:", WEBHOOK_URL);
 // ================== 消息历史 & 会话管理 ==================
 const chatHistory = {};
 const userTopics = {};
+const greetedUsers = new Set(); // 记录已经回复过 /start 的用户
 
 // ================== 队列发送工具 ==================
 const sendQueue = [];
@@ -80,7 +81,13 @@ app.post("/webhook", async (req, res) => {
       const msg = update.message;
       const userId = msg.from.id;
 
-      // 创建话题窗口
+      // ------------------ 首次 /start 回复 ------------------
+      if (!greetedUsers.has(userId) && msg.text && msg.text.toLowerCase() === "/start") {
+        sendMessage(userId, "Hola, soy Leah. ¿Cómo debería llamarte?");
+        greetedUsers.add(userId);
+      }
+
+      // ------------------ 创建话题窗口 ------------------
       if (!userTopics[userId]) {
         try {
           const topicRes = await axios.post(`${TELEGRAM_API}/createForumTopic`, null, {
@@ -97,7 +104,7 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // 保存消息
+      // ------------------ 保存消息 ------------------
       let savedMessage = { from: "user", type: "text", message: msg.text };
       if (msg.text) savedMessage.type = "text";
       else if (msg.photo) { savedMessage.type = "Photo"; savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id; }
@@ -106,7 +113,7 @@ app.post("/webhook", async (req, res) => {
 
       saveMessage(userId, savedMessage);
 
-      // 转发到客服群话题
+      // ------------------ 转发到客服群话题 ------------------
       const topicId = userTopics[userId];
       if (savedMessage.type === "text") sendMessage(GROUP_CHAT_ID, `用户 ${userId} 说:\n${savedMessage.message}`, null, topicId);
       else sendFile(GROUP_CHAT_ID, savedMessage.type, savedMessage.file_id, null, topicId);
@@ -129,7 +136,7 @@ app.post("/webhook", async (req, res) => {
 
       saveMessage(userId, savedMessage);
 
-      // 自动转发给客户
+      // ------------------ 自动转发给客户 ------------------
       if (savedMessage.type === "text") sendMessage(userId, savedMessage.message);
       else sendFile(userId, savedMessage.type, savedMessage.file_id);
     }
