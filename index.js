@@ -11,12 +11,13 @@ app.use(express.json());
 const TOKEN = process.env.BOT_TOKEN;
 const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID);
 const PORT = process.env.PORT || 3000;
-const DOMAIN = process.env.RAILWAY_STATIC_URL || `localhost:${PORT}`;
-const WEBHOOK_URL = `https://${DOMAIN}/webhook`;
+
+// 优先使用 .env 里设置的 WEBHOOK_URL
+const WEBHOOK_URL = process.env.WEBHOOK_URL || `https://${process.env.RAILWAY_STATIC_URL || 'localhost:' + PORT}/webhook`;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
 
-// 调试输出 BOT_TOKEN 和 Webhook URL
+// 调试输出
 console.log("BOT_TOKEN:", TOKEN ? TOKEN.substring(0, 8) + "..." : "未设置");
 console.log("Webhook URL:", WEBHOOK_URL);
 
@@ -170,7 +171,10 @@ app.get("/set-webhook", async (req, res) => {
     console.log("[手动设置Webhook] 响应:", webhookRes.data);
     res.json(webhookRes.data);
   } catch (err) {
-    console.error("[手动设置Webhook异常]", err.response?.data || err.message);
+    console.error("[手动设置Webhook异常] message:", err.message);
+    console.error("[手动设置Webhook异常] code:", err.code);
+    console.error("[手动设置Webhook异常] config:", err.config);
+    if (err.response) console.error("[手动设置Webhook异常] response:", err.response.data);
     res.json({ ok: false, error: err.response?.data || err.message });
   }
 });
@@ -187,6 +191,9 @@ app.listen(PORT, async () => {
     if (resWebhook.data.ok) console.log("Webhook 设置成功:", WEBHOOK_URL);
     else console.error("Webhook 设置失败:", resWebhook.data);
   } catch (err) {
-    console.error("[自动设置Webhook异常]", err.response?.data || err.message);
+    console.error("[自动设置Webhook异常] message:", err.message);
+    console.error("[自动设置Webhook异常] code:", err.code);
+    console.error("[自动设置Webhook异常] config:", err.config);
+    if (err.response) console.error("[自动设置Webhook异常] response:", err.response.data);
   }
 });
