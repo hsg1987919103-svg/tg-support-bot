@@ -11,7 +11,11 @@ app.use(express.json());
 const TOKEN = process.env.BOT_TOKEN;
 const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID);
 const PORT = process.env.PORT || 3000;
-const WEBHOOK_URL = process.env.WEBHOOK_URL || `https://${process.env.RAILWAY_STATIC_URL || 'localhost:' + PORT}/webhook`;
+
+// 确保 WEBHOOK_URL 有 https:// 和 /webhook
+let WEBHOOK_URL = process.env.WEBHOOK_URL;
+if (!WEBHOOK_URL.startsWith("https://")) WEBHOOK_URL = "https://" + WEBHOOK_URL;
+if (!WEBHOOK_URL.endsWith("/webhook")) WEBHOOK_URL += "/webhook";
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
 
@@ -49,7 +53,7 @@ function enqueueSend(method, payload) {
 }
 
 function sendMessage(chat_id, text, replyToMessageId = null, topic_id = null) {
-  if (!text || !text.trim()) return; // 避免空文本发送
+  if (!text || !text.trim()) return;
   const payload = { chat_id, text, reply_to_message_id: replyToMessageId || undefined };
   if (topic_id) payload.message_thread_id = topic_id;
   enqueueSend("sendMessage", payload);
