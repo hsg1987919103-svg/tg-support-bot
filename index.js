@@ -12,7 +12,7 @@ const TOKEN = process.env.BOT_TOKEN;
 const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID);
 const PORT = process.env.PORT || 3000;
 
-// 优先使用 .env 里设置的 WEBHOOK_URL
+// 优先使用 .env 中的 WEBHOOK_URL
 const WEBHOOK_URL = process.env.WEBHOOK_URL || `https://${process.env.RAILWAY_STATIC_URL || 'localhost:' + PORT}/webhook`;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
@@ -22,8 +22,8 @@ console.log("BOT_TOKEN:", TOKEN ? TOKEN.substring(0, 8) + "..." : "未设置");
 console.log("Webhook URL:", WEBHOOK_URL);
 
 // ================== 消息历史 & 会话管理 ==================
-const chatHistory = {};  
-const userTopics = {};  
+const chatHistory = {};
+const userTopics = {};
 
 // ================== 队列与工具函数 ==================
 const sendQueue = [];
@@ -173,7 +173,6 @@ app.get("/set-webhook", async (req, res) => {
   } catch (err) {
     console.error("[手动设置Webhook异常] message:", err.message);
     console.error("[手动设置Webhook异常] code:", err.code);
-    console.error("[手动设置Webhook异常] config:", err.config);
     if (err.response) console.error("[手动设置Webhook异常] response:", err.response.data);
     res.json({ ok: false, error: err.response?.data || err.message });
   }
@@ -183,7 +182,12 @@ app.get("/set-webhook", async (req, res) => {
 app.listen(PORT, async () => {
   console.log(`Telegram 支持机器人已启动，监听端口 ${PORT}`);
 
+  // 先检测 Webhook URL 可达性
   try {
+    console.log("[检测 Webhook URL 可达性]", WEBHOOK_URL);
+    await axios.get(WEBHOOK_URL, { timeout: 5000 }); // 5秒超时
+    console.log("[Webhook URL 可达] 开始设置 Telegram Webhook");
+
     const resWebhook = await axios.post(`${TELEGRAM_API}/setWebhook`, null, {
       params: { url: WEBHOOK_URL }
     });
@@ -191,9 +195,6 @@ app.listen(PORT, async () => {
     if (resWebhook.data.ok) console.log("Webhook 设置成功:", WEBHOOK_URL);
     else console.error("Webhook 设置失败:", resWebhook.data);
   } catch (err) {
-    console.error("[自动设置Webhook异常] message:", err.message);
-    console.error("[自动设置Webhook异常] code:", err.code);
-    console.error("[自动设置Webhook异常] config:", err.config);
-    if (err.response) console.error("[自动设置Webhook异常] response:", err.response.data);
+    console.error("[Webhook URL 不可达或设置失败]", err.message || err);
   }
 });
