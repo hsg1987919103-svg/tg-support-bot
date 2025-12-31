@@ -9,18 +9,17 @@ app.use(express.json());
 
 // ================== 配置 ==================
 const TOKEN = process.env.BOT_TOKEN;
-const SUPPORT_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID); // 客服群组ID
-const DOMAIN = process.env.RAILWAY_STATIC_URL || `localhost:${process.env.PORT || 3000}`;
+const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID); // 客服群ID
+const PORT = process.env.PORT || 3000;
+const DOMAIN = process.env.RAILWAY_STATIC_URL || `localhost:${PORT}`;
 const WEBHOOK_URL = `https://${DOMAIN}/webhook`;
 
-const PORT = process.env.PORT || 3000;
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
-
 console.log("Webhook URL:", WEBHOOK_URL);
 
-// ================== 消息历史和会话管理 ==================
-const chatHistory = {}; // { userId: [{from: 'user'|'support', type, message, file_id, timestamp}] }
-const userTopics = {};  // { userId: topic_id }  // 存储用户对应的群组话题ID
+// ================== 消息历史 & 会话管理 ==================
+const chatHistory = {};  // { userId: [ {from,type,message,file_id,timestamp} ] }
+const userTopics = {};   // { userId: topic_id }
 
 // ================== 队列与工具函数 ==================
 const sendQueue = [];
@@ -33,7 +32,7 @@ async function processQueue() {
   } catch (err) {
     if (err.response && err.response.status === 429) {
       const retryAfter = err.response.data.parameters?.retry_after || 1;
-      console.warn(`429 Too Many Requests, retry after ${retryAfter} seconds`);
+      console.warn(`429 Too Many Requests, retry after ${retryAfter}s`);
       sendQueue.unshift(task);
       await new Promise(r => setTimeout(r, retryAfter * 1000));
     } else {
@@ -70,23 +69,27 @@ app.post("/webhook", async (req, res) => {
   const update = req.body;
 
   try {
-    // 用户发消息给机器人
-    if (update.message && update.message.chat && !update.message.chat.id === SUPPORT_CHAT_ID) {
+    // ------------------ 用户发消息 ------------------
+    if (update.message && update.message.chat && !update.message.chat.id === GROUP_CHAT_ID) {
       const msg = update.message;
       const userId = msg.from.id;
 
-      // 创建新的会话话题（如果还没有）
+      // 如果该用户没有话题，创建新的会话窗口
       if (!userTopics[userId]) {
-        // 通过 Telegram API 创建话题（需群是讨论群）
-        const topicRes = await axios.post(`${TELEGRAM_API}/createForumTopic`, null, {
-          params: {
-            chat_id: SUPPORT_CHAT_ID,
-            name: `用户 ${userId} 会话`,
-          },
-        });
-        if (topicRes.data.ok) userTopics[userId] = topicRes.data.result.message_thread_id;
+        try {
+          const topicRes = await axios.post(`${TELEGRAM_API}/createForumTopic`, null, {
+            params: { chat_id: GROUP_CHAT_ID, name: `用户 ${userId} 会话` }
+          });
+          if (topicRes.data.ok) {
+            userTopics[userId] = topicRes.data.result.message_thread_id;
+            console.log(`创建话题成功: 用户 ${userId}, topic_id=${userTopics[userId]}`);
+          }
+        } catch (err) {
+          console.error("创建话题失败:", err.response?.data || err.message);
+        }
       }
 
+      // 保存消息
       let savedMessage = { from: "user", type: "text", message: msg.text };
       if (msg.text) savedMessage.type = "text";
       else if (msg.photo) {
@@ -104,12 +107,12 @@ app.post("/webhook", async (req, res) => {
 
       // 转发到客服群对应话题
       const topicId = userTopics[userId];
-      if (savedMessage.type === "text") sendMessage(SUPPORT_CHAT_ID, `用户 ${userId} 说:\n${savedMessage.message}`, null, topicId);
-      else sendFile(SUPPORT_CHAT_ID, savedMessage.type, savedMessage.file_id, null, topicId);
+      if (savedMessage.type === "text") sendMessage(GROUP_CHAT_ID, `用户 ${userId} 说:\n${savedMessage.message}`, null, topicId);
+      else sendFile(GROUP_CHAT_ID, savedMessage.type, savedMessage.file_id, null, topicId);
     }
 
-    // 客服在群组话题回复
-    if (update.message && update.message.chat.id === SUPPORT_CHAT_ID) {
+    // ------------------ 客服在群话题回复 ------------------
+    if (update.message && update.message.chat.id === GROUP_CHAT_ID) {
       const msg = update.message;
       const topicId = msg.message_thread_id;
       if (!topicId) return res.sendStatus(200);
@@ -133,7 +136,7 @@ app.post("/webhook", async (req, res) => {
 
       saveMessage(userId, savedMessage);
 
-      // 转发给用户
+      // 自动转发给客户
       if (savedMessage.type === "text") sendMessage(userId, savedMessage.message);
       else sendFile(userId, savedMessage.type, savedMessage.file_id);
     }
@@ -145,7 +148,7 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ================== 手动重试 Webhook 设置接口 ==================
+// ================== 手动重试 Webhook ==================
 app.get("/set-webhook", async (req, res) => {
   try {
     const webhookRes = await axios.post(`${TELEGRAM_API}/setWebhook`, {}, { params: { url: WEBHOOK_URL } });
