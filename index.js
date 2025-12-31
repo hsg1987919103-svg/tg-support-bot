@@ -71,7 +71,7 @@ app.post("/webhook", async (req, res) => {
 
   try {
     // ------------------ 用户发消息 ------------------
-    if (update.message && update.message.chat && !update.message.chat.id === GROUP_CHAT_ID) {
+    if (update.message && update.message.chat && update.message.chat.id !== GROUP_CHAT_ID) {
       const msg = update.message;
       const userId = msg.from.id;
       console.log("[用户消息] userId:", userId, "内容:", msg.text || "非文本消息");
@@ -84,10 +84,12 @@ app.post("/webhook", async (req, res) => {
           });
           if (topicRes.data.ok) {
             userTopics[userId] = topicRes.data.result.message_thread_id;
-            console.log(`[话题创建成功] userId: ${userId}, topic_id: ${userTopics[userId]}`);
+            console.log(`[话题创建成功] userId: ${userId}, topic_id=${userTopics[userId]}`);
+          } else {
+            console.warn("[话题创建响应失败]", topicRes.data);
           }
         } catch (err) {
-          console.error("[话题创建失败]", err.response?.data || err.message);
+          console.error("[话题创建异常]", err.response?.data || err.message);
         }
       }
 
@@ -121,7 +123,6 @@ app.post("/webhook", async (req, res) => {
 
       console.log("[客服消息] topic_id:", topicId, "内容:", msg.text || "非文本消息");
 
-      // 找到对应用户
       const userId = Object.keys(userTopics).find(k => userTopics[k] === topicId);
       if (!userId) {
         console.warn("[未匹配用户] topic_id:", topicId);
@@ -161,10 +162,11 @@ app.post("/webhook", async (req, res) => {
 app.get("/set-webhook", async (req, res) => {
   try {
     const webhookRes = await axios.post(`${TELEGRAM_API}/setWebhook`, {}, { params: { url: WEBHOOK_URL } });
+    console.log("[手动设置Webhook] 响应:", webhookRes.data);
     res.json(webhookRes.data);
   } catch (err) {
-    if (err.response) res.json(err.response.data);
-    else res.json({ ok: false, error: err.message });
+    console.error("[手动设置Webhook异常]", err.response?.data || err.message);
+    res.json({ ok: false, error: err.response?.data || err.message });
   }
 });
 
@@ -174,10 +176,10 @@ app.listen(PORT, async () => {
 
   try {
     const resWebhook = await axios.post(`${TELEGRAM_API}/setWebhook`, {}, { params: { url: WEBHOOK_URL } });
+    console.log("[自动设置Webhook] 响应:", resWebhook.data);
     if (resWebhook.data.ok) console.log("Webhook 设置成功:", WEBHOOK_URL);
     else console.error("Webhook 设置失败:", resWebhook.data);
   } catch (err) {
-    if (err.response) console.error("Webhook 设置失败:", err.response.data);
-    else console.error("Webhook 设置异常:", err.message);
+    console.error("[自动设置Webhook异常]", err.response?.data || err.message);
   }
 });
