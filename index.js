@@ -15,6 +15,9 @@ const DOMAIN = process.env.RAILWAY_STATIC_URL || `localhost:${PORT}`;
 const WEBHOOK_URL = `https://${DOMAIN}/webhook`;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
+
+// 调试输出 BOT_TOKEN 和 Webhook URL
+console.log("BOT_TOKEN:", TOKEN ? TOKEN.substring(0, 8) + "..." : "未设置");
 console.log("Webhook URL:", WEBHOOK_URL);
 
 // ================== 消息历史 & 会话管理 ==================
@@ -161,7 +164,9 @@ app.post("/webhook", async (req, res) => {
 // ================== 手动重试 Webhook ==================
 app.get("/set-webhook", async (req, res) => {
   try {
-    const webhookRes = await axios.post(`${TELEGRAM_API}/setWebhook`, {}, { params: { url: WEBHOOK_URL } });
+    const webhookRes = await axios.post(`${TELEGRAM_API}/setWebhook`, null, {
+      params: { url: WEBHOOK_URL }
+    });
     console.log("[手动设置Webhook] 响应:", webhookRes.data);
     res.json(webhookRes.data);
   } catch (err) {
@@ -175,7 +180,9 @@ app.listen(PORT, async () => {
   console.log(`Telegram 支持机器人已启动，监听端口 ${PORT}`);
 
   try {
-    const resWebhook = await axios.post(`${TELEGRAM_API}/setWebhook`, {}, { params: { url: WEBHOOK_URL } });
+    const resWebhook = await axios.post(`${TELEGRAM_API}/setWebhook`, null, {
+      params: { url: WEBHOOK_URL }
+    });
     console.log("[自动设置Webhook] 响应:", resWebhook.data);
     if (resWebhook.data.ok) console.log("Webhook 设置成功:", WEBHOOK_URL);
     else console.error("Webhook 设置失败:", resWebhook.data);
