@@ -1,198 +1,137 @@
 import express from "express";
-import TelegramBot from "node-telegram-bot-api";
-import pkg from "pg";
+import axios from "axios";
 
-const { Pool } = pkg;
-
-// ================== 配置 ==================
-const TOKEN = process.env.BOT_TOKEN;          // Telegram 机器人 Token
-const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID; // 客服群 ID
-const DATABASE_URL = process.env.DATABASE_URL;   // PostgreSQL 连接字符串
-
-// ================== 初始化 ==================
 const app = express();
 app.use(express.json());
 
-const bot = new TelegramBot(TOKEN, { polling: false });
-const pool = new Pool({ connectionString: DATABASE_URL });
+// ================== 配置 ==================
+const TOKEN = process.env.BOT_TOKEN; // 你的 Telegram Bot Token
+const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID; // 客服群聊 ID
+const WEBHOOK_URL = "https://tg-support-bot-production-6fe5.up.railway.app/webhook"; // 你的 Railway URL
+const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
 
-// ================== 数据库工具函数 ==================
+// 内存存储聊天记录
+const chatHistory = {};
 
-async function ensureUser(telegramId, name) {
-  const client = await pool.connect();
-  try {
-    const res = await client.query(
-      "SELECT * FROM users WHERE telegram_id=$1",
-      [telegramId]
-    );
-    if (res.rows.length === 0) {
-      await client.query(
-        "INSERT INTO users (telegram_id, name) VALUES ($1, $2)",
-        [telegramId, name]
-      );
-    }
-  } finally {
-    client.release();
-  }
+// ================== 工具函数 ==================
+async function sendMessage(chat_id, text, replyToMessageId = null) {
+  await axios.post(`${TELEGRAM_API}/sendMessage`, {
+    chat_id,
+    text,
+    reply_to_message_id: replyToMessageId || undefined,
+  });
 }
 
-async function createThread(userId, topicId) {
-  const client = await pool.connect();
-  try {
-    await client.query(
-      "INSERT INTO threads (user_id, topic_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-      [userId, topicId]
-    );
-  } finally {
-    client.release();
-  }
+async function sendFile(chat_id, type, file_id, replyToMessageId = null) {
+  await axios.post(`${TELEGRAM_API}/send${type}`, {
+    chat_id,
+    [`${type.toLowerCase()}`]: file_id,
+    reply_to_message_id: replyToMessageId || undefined,
+  });
 }
 
-async function getThreadUser(topicId) {
-  const client = await pool.connect();
-  try {
-    const res = await client.query(
-      "SELECT user_id FROM threads WHERE topic_id=$1",
-      [topicId]
-    );
-    if (res.rows.length === 0) return null;
-    return res.rows[0].user_id;
-  } finally {
-    client.release();
-  }
+function saveMessage(userId, message) {
+  if (!chatHistory[userId]) chatHistory[userId] = [];
+  chatHistory[userId].push({ ...message, timestamp: new Date() });
 }
 
-async function saveMessage(threadId, sender, content, type, file_id = null) {
-  const client = await pool.connect();
-  try {
-    await client.query(
-      "INSERT INTO messages (thread_id, sender, content, type, file_id) VALUES ($1,$2,$3,$4,$5)",
-      [threadId, sender, content, type, file_id]
-    );
-  } finally {
-    client.release();
-  }
-}
-
-async function getThreadIdByTopic(topicId) {
-  const client = await pool.connect();
-  try {
-    const res = await client.query(
-      "SELECT id FROM threads WHERE topic_id=$1",
-      [topicId]
-    );
-    if (res.rows.length === 0) return null;
-    return res.rows[0].id;
-  } finally {
-    client.release();
-  }
-}
-
-// ================== Webhook 接口 ==================
-
+// ================== Webhook 接收消息 ==================
 app.post("/webhook", async (req, res) => {
-  const message = req.body.message || req.body.edited_message;
-  if (!message) return res.sendStatus(200);
-
-  const chatId = message.chat.id;
-  const fromName = message.from?.first_name || "未知用户";
+  const update = req.body;
 
   try {
-    // ===== 客户发消息给机器人 =====
-    if (message.chat.type === "private") {
-      await ensureUser(chatId, fromName);
+    // ================== 客户消息 ==================
+    if (update.message && update.message.chat) {
+      const msg = update.message;
+      const fromUserId = msg.from.id;
 
-      let sentMessage;
+      let savedMessage = { from: "user", type: "text", message: msg.text };
 
-      // 文本消息
-      if (message.text) {
-        sentMessage = await bot.sendMessage(GROUP_CHAT_ID, `📨 来自 ${fromName} 的消息：\n${message.text}`, {
-          message_thread_id: undefined // 自动创建话题
-        });
+      if (msg.text) {
+        savedMessage.type = "text";
+      } else if (msg.photo) {
+        savedMessage.type = "Photo";
+        savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id;
+      } else if (msg.voice) {
+        savedMessage.type = "Voice";
+        savedMessage.file_id = msg.voice.file_id;
+      } else if (msg.document) {
+        savedMessage.type = "Document";
+        savedMessage.file_id = msg.document.file_id;
       }
 
-      // 图片消息
-      if (message.photo) {
-        const file_id = message.photo[message.photo.length - 1].file_id;
-        sentMessage = await bot.sendPhoto(GROUP_CHAT_ID, file_id, {
-          caption: `📸 来自 ${fromName} 的图片`,
-          message_thread_id: undefined
-        });
-      }
+      saveMessage(fromUserId, savedMessage);
 
-      // 文件消息
-      if (message.document) {
-        const file_id = message.document.file_id;
-        sentMessage = await bot.sendDocument(GROUP_CHAT_ID, file_id, {
-          caption: `📄 来自 ${fromName} 的文件: ${message.document.file_name}`,
-          message_thread_id: undefined
-        });
-      }
-
-      // 语音消息
-      if (message.voice) {
-        const file_id = message.voice.file_id;
-        sentMessage = await bot.sendVoice(GROUP_CHAT_ID, file_id, {
-          caption: `🎤 来自 ${fromName} 的语音`,
-          message_thread_id: undefined
-        });
-      }
-
-      // 保存话题信息
-      await createThread(chatId, sentMessage.message_thread_id);
-      const threadId = await getThreadIdByTopic(sentMessage.message_thread_id);
-
-      // 保存消息记录
-      let type = message.text ? "text" : message.photo ? "photo" : message.document ? "document" : message.voice ? "voice" : "text";
-      let content = message.text || "";
-      let file_id = message.photo ? message.photo[message.photo.length - 1].file_id : message.document ? message.document.file_id : message.voice ? message.voice.file_id : null;
-
-      await saveMessage(threadId, "customer", content, type, file_id);
-    }
-
-    // ===== 客服群话题消息 =====
-    if (chatId == GROUP_CHAT_ID && message.message_thread_id) {
-      const threadId = await getThreadIdByTopic(message.message_thread_id);
-      if (!threadId) return res.sendStatus(200);
-
-      const userId = await getThreadUser(message.message_thread_id);
-      if (!userId) return res.sendStatus(200);
-
-      // 文本消息
-      if (message.text) {
-        await bot.sendMessage(userId, message.text);
-        await saveMessage(threadId, "agent", message.text, "text");
-      }
-
-      // 图片消息
-      if (message.photo) {
-        const file_id = message.photo[message.photo.length - 1].file_id;
-        await bot.sendPhoto(userId, file_id);
-        await saveMessage(threadId, "agent", "", "photo", file_id);
-      }
-
-      // 文件消息
-      if (message.document) {
-        const file_id = message.document.file_id;
-        await bot.sendDocument(userId, file_id);
-        await saveMessage(threadId, "agent", message.document.file_name, "document", file_id);
-      }
-
-      // 语音消息
-      if (message.voice) {
-        const file_id = message.voice.file_id;
-        await bot.sendVoice(userId, file_id);
-        await saveMessage(threadId, "agent", "", "voice", file_id);
+      if (savedMessage.type === "text") {
+        await sendMessage(
+          GROUP_CHAT_ID,
+          `用户 ${fromUserId} 说:\n${savedMessage.message}`
+        );
+      } else {
+        await sendFile(GROUP_CHAT_ID, savedMessage.type, savedMessage.file_id);
       }
     }
 
+    // ================== 群里客服回复 ==================
+    if (update.message && update.message.chat.id.toString() === GROUP_CHAT_ID) {
+      const msg = update.message;
+
+      if (msg.reply_to_message) {
+        const match = msg.reply_to_message.text?.match(/用户 (\d+) 说:/);
+        if (match) {
+          const userId = parseInt(match[1]);
+
+          let savedMessage = { from: "support", type: "text", message: msg.text };
+
+          if (msg.text) {
+            savedMessage.type = "text";
+          } else if (msg.photo) {
+            savedMessage.type = "Photo";
+            savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id;
+          } else if (msg.voice) {
+            savedMessage.type = "Voice";
+            savedMessage.file_id = msg.voice.file_id;
+          } else if (msg.document) {
+            savedMessage.type = "Document";
+            savedMessage.file_id = msg.document.file_id;
+          }
+
+          saveMessage(userId, savedMessage);
+
+          if (savedMessage.type === "text") {
+            await sendMessage(userId, savedMessage.message);
+          } else {
+            await sendFile(userId, savedMessage.type, savedMessage.file_id);
+          }
+        }
+      }
+    }
+
+    res.sendStatus(200);
   } catch (err) {
-    console.error("处理消息错误:", err);
+    console.error(err);
+    res.sendStatus(500);
   }
-
-  res.sendStatus(200);
 });
 
-// ================== 启动服务 ==================
+// ================== 启动服务器 ==================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, async () => {
+  console.log(`Telegram 支持机器人已启动，监听端口 ${PORT}`);
+
+  // 自动设置 Webhook
+  try {
+    const res = await axios.post(
+      `https://api.telegram.org/bot${TOKEN}/setWebhook`,
+      {},
+      { params: { url: WEBHOOK_URL } }
+    );
+    if (res.data.ok) {
+      console.log("Webhook 设置成功:", WEBHOOK_URL);
+    } else {
+      console.error("Webhook 设置失败:", res.data);
+    }
+  } catch (err) {
+    console.error("Webhook 设置异常:", err.message);
+  }
+});
