@@ -12,12 +12,11 @@ const TOKEN = process.env.BOT_TOKEN;
 const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID);
 const PORT = process.env.PORT || 3000;
 
-// 优先使用 .env 中的 WEBHOOK_URL
+// 使用 .env 中的 WEBHOOK_URL
 const WEBHOOK_URL = process.env.WEBHOOK_URL || `https://${process.env.RAILWAY_STATIC_URL || 'localhost:' + PORT}/webhook`;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
 
-// 调试输出
 console.log("BOT_TOKEN:", TOKEN ? TOKEN.substring(0, 8) + "..." : "未设置");
 console.log("Webhook URL:", WEBHOOK_URL);
 
@@ -25,14 +24,13 @@ console.log("Webhook URL:", WEBHOOK_URL);
 const chatHistory = {};
 const userTopics = {};
 
-// ================== 队列与工具函数 ==================
+// ================== 队列发送工具 ==================
 const sendQueue = [];
 
 async function processQueue() {
   if (sendQueue.length === 0) return;
   const task = sendQueue.shift();
   try {
-    console.log("[队列发送] 方法:", task.method, "Payload:", task.payload);
     await axios.post(`${TELEGRAM_API}/${task.method}`, task.payload);
   } catch (err) {
     if (err.response && err.response.status === 429) {
@@ -78,7 +76,6 @@ app.post("/webhook", async (req, res) => {
     if (update.message && update.message.chat && update.message.chat.id !== GROUP_CHAT_ID) {
       const msg = update.message;
       const userId = msg.from.id;
-      console.log("[用户消息] userId:", userId, "内容:", msg.text || "非文本消息");
 
       // 创建话题窗口
       if (!userTopics[userId]) {
@@ -86,12 +83,7 @@ app.post("/webhook", async (req, res) => {
           const topicRes = await axios.post(`${TELEGRAM_API}/createForumTopic`, null, {
             params: { chat_id: GROUP_CHAT_ID, name: `用户 ${userId} 会话` }
           });
-          if (topicRes.data.ok) {
-            userTopics[userId] = topicRes.data.result.message_thread_id;
-            console.log(`[话题创建成功] userId: ${userId}, topic_id=${userTopics[userId]}`);
-          } else {
-            console.warn("[话题创建响应失败]", topicRes.data);
-          }
+          if (topicRes.data.ok) userTopics[userId] = topicRes.data.result.message_thread_id;
         } catch (err) {
           console.error("[话题创建异常]", err.response?.data || err.message);
         }
@@ -100,16 +92,9 @@ app.post("/webhook", async (req, res) => {
       // 保存消息
       let savedMessage = { from: "user", type: "text", message: msg.text };
       if (msg.text) savedMessage.type = "text";
-      else if (msg.photo) {
-        savedMessage.type = "Photo";
-        savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id;
-      } else if (msg.voice) {
-        savedMessage.type = "Voice";
-        savedMessage.file_id = msg.voice.file_id;
-      } else if (msg.document) {
-        savedMessage.type = "Document";
-        savedMessage.file_id = msg.document.file_id;
-      }
+      else if (msg.photo) { savedMessage.type = "Photo"; savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id; }
+      else if (msg.voice) { savedMessage.type = "Voice"; savedMessage.file_id = msg.voice.file_id; }
+      else if (msg.document) { savedMessage.type = "Document"; savedMessage.file_id = msg.document.file_id; }
 
       saveMessage(userId, savedMessage);
 
@@ -125,34 +110,20 @@ app.post("/webhook", async (req, res) => {
       const topicId = msg.message_thread_id;
       if (!topicId) return res.sendStatus(200);
 
-      console.log("[客服消息] topic_id:", topicId, "内容:", msg.text || "非文本消息");
-
       const userId = Object.keys(userTopics).find(k => userTopics[k] === topicId);
-      if (!userId) {
-        console.warn("[未匹配用户] topic_id:", topicId);
-        return res.sendStatus(200);
-      }
+      if (!userId) return res.sendStatus(200);
 
       let savedMessage = { from: "support", type: "text", message: msg.text };
       if (msg.text) savedMessage.type = "text";
-      else if (msg.photo) {
-        savedMessage.type = "Photo";
-        savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id;
-      } else if (msg.voice) {
-        savedMessage.type = "Voice";
-        savedMessage.file_id = msg.voice.file_id;
-      } else if (msg.document) {
-        savedMessage.type = "Document";
-        savedMessage.file_id = msg.document.file_id;
-      }
+      else if (msg.photo) { savedMessage.type = "Photo"; savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id; }
+      else if (msg.voice) { savedMessage.type = "Voice"; savedMessage.file_id = msg.voice.file_id; }
+      else if (msg.document) { savedMessage.type = "Document"; savedMessage.file_id = msg.document.file_id; }
 
       saveMessage(userId, savedMessage);
 
       // 自动转发给客户
       if (savedMessage.type === "text") sendMessage(userId, savedMessage.message);
       else sendFile(userId, savedMessage.type, savedMessage.file_id);
-
-      console.log(`[已转发给用户] userId: ${userId}, 类型: ${savedMessage.type}`);
     }
 
     res.sendStatus(200);
@@ -165,15 +136,10 @@ app.post("/webhook", async (req, res) => {
 // ================== 手动重试 Webhook ==================
 app.get("/set-webhook", async (req, res) => {
   try {
-    const webhookRes = await axios.post(`${TELEGRAM_API}/setWebhook`, null, {
-      params: { url: WEBHOOK_URL }
-    });
-    console.log("[手动设置Webhook] 响应:", webhookRes.data);
+    const webhookRes = await axios.post(`${TELEGRAM_API}/setWebhook`, null, { params: { url: WEBHOOK_URL } });
     res.json(webhookRes.data);
   } catch (err) {
-    console.error("[手动设置Webhook异常] message:", err.message);
-    console.error("[手动设置Webhook异常] code:", err.code);
-    if (err.response) console.error("[手动设置Webhook异常] response:", err.response.data);
+    console.error("[手动设置Webhook异常]", err.response?.data || err.message);
     res.json({ ok: false, error: err.response?.data || err.message });
   }
 });
@@ -182,19 +148,15 @@ app.get("/set-webhook", async (req, res) => {
 app.listen(PORT, async () => {
   console.log(`Telegram 支持机器人已启动，监听端口 ${PORT}`);
 
-  // 先检测 Webhook URL 可达性
   try {
-    console.log("[检测 Webhook URL 可达性]", WEBHOOK_URL);
-    await axios.get(WEBHOOK_URL, { timeout: 5000 }); // 5秒超时
+    // 检测 Webhook URL 可达性（GET 请求）
+    await axios.get(WEBHOOK_URL, { timeout: 5000 });
     console.log("[Webhook URL 可达] 开始设置 Telegram Webhook");
 
-    const resWebhook = await axios.post(`${TELEGRAM_API}/setWebhook`, null, {
-      params: { url: WEBHOOK_URL }
-    });
-    console.log("[自动设置Webhook] 响应:", resWebhook.data);
+    const resWebhook = await axios.post(`${TELEGRAM_API}/setWebhook`, null, { params: { url: WEBHOOK_URL } });
     if (resWebhook.data.ok) console.log("Webhook 设置成功:", WEBHOOK_URL);
     else console.error("Webhook 设置失败:", resWebhook.data);
   } catch (err) {
-    console.error("[Webhook URL 不可达或设置失败]", err.message || err);
+    console.error("[Webhook URL 不可达或设置失败]", err.response?.data || err.message);
   }
 });
