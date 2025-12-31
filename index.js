@@ -86,7 +86,12 @@ app.post("/webhook", async (req, res) => {
           const topicRes = await axios.post(`${TELEGRAM_API}/createForumTopic`, null, {
             params: { chat_id: GROUP_CHAT_ID, name: `用户 ${userId} 会话` }
           });
-          if (topicRes.data.ok) userTopics[userId] = topicRes.data.result.message_thread_id;
+          if (topicRes.data.ok) {
+            userTopics[userId] = topicRes.data.result.message_thread_id;
+            console.log(`[话题创建成功] 用户 ${userId} -> 话题ID ${userTopics[userId]}`);
+          } else {
+            console.error("[话题创建失败]", topicRes.data);
+          }
         } catch (err) {
           console.error("[话题创建异常]", err.response?.data || err.message);
         }
@@ -158,7 +163,7 @@ app.listen(PORT, async () => {
   try {
     const resWebhook = await axios.post(`${TELEGRAM_API}/setWebhook`, null, { params: { url: WEBHOOK_URL } });
     if (resWebhook.data.ok) console.log("Webhook 设置成功:", WEBHOOK_URL);
-    else console.error("Webhook 设置失败:", resWebhook.data);
+    else console.error("[Webhook设置失败]", resWebhook.data);
   } catch (err) {
     console.error("[自动设置Webhook异常]", err.response?.data || err.message);
   }
