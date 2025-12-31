@@ -1,6 +1,8 @@
 import express from "express";
 import axios from "axios";
 import dotenv from "dotenv";
+import sqlite3 from "sqlite3";
+import { open } from "sqlite";
 
 dotenv.config();
 
@@ -10,18 +12,34 @@ app.use(express.json());
 // ================== 配置 ==================
 const TOKEN = process.env.BOT_TOKEN;
 const GROUP_CHAT_ID = parseInt(process.env.GROUP_CHAT_ID);
-
-// 自动生成 Webhook URL
 const DOMAIN = process.env.RAILWAY_STATIC_URL || `localhost:${process.env.PORT || 3000}`;
 const WEBHOOK_URL = `https://${DOMAIN}/webhook`;
+const PORT = process.env.PORT || 3000;
+
+const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
 
 console.log("Webhook URL:", WEBHOOK_URL);
 
-const PORT = process.env.PORT || 3000;
-const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
+// ================== SQLite 初始化 ==================
+let db;
+(async () => {
+  db = await open({
+    filename: './chat_history.db',
+    driver: sqlite3.Database
+  });
 
-// ================== 消息历史存储 ==================
-const chatHistory = {};
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      sender TEXT,
+      type TEXT,
+      content TEXT,
+      file_id TEXT,
+      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+})();
 
 // ================== 队列与工具函数 ==================
 const sendQueue = [];
@@ -59,9 +77,11 @@ function sendFile(chat_id, type, file_id, replyToMessageId = null) {
   enqueueSend(`send${type}`, { chat_id, [`${type.toLowerCase()}`]: file_id, reply_to_message_id: replyToMessageId || undefined });
 }
 
-function saveMessage(userId, message) {
-  if (!chatHistory[userId]) chatHistory[userId] = [];
-  chatHistory[userId].push({ ...message, timestamp: new Date() });
+async function saveMessage(userId, sender, type, content = null, file_id = null) {
+  await db.run(
+    `INSERT INTO messages (user_id, sender, type, content, file_id) VALUES (?, ?, ?, ?, ?)`,
+    userId, sender, type, content, file_id
+  );
 }
 
 // ================== Webhook 接收消息 ==================
@@ -87,7 +107,7 @@ app.post("/webhook", async (req, res) => {
         savedMessage.file_id = msg.document.file_id;
       }
 
-      saveMessage(fromUserId, savedMessage);
+      await saveMessage(fromUserId, "user", savedMessage.type, savedMessage.message, savedMessage.file_id);
 
       if (savedMessage.type === "text") {
         sendMessage(GROUP_CHAT_ID, `用户 ${fromUserId} 说:\n${savedMessage.message}`);
@@ -117,7 +137,7 @@ app.post("/webhook", async (req, res) => {
             savedMessage.file_id = msg.document.file_id;
           }
 
-          saveMessage(userId, savedMessage);
+          await saveMessage(userId, "support", savedMessage.type, savedMessage.message, savedMessage.file_id);
 
           if (savedMessage.type === "text") {
             sendMessage(userId, savedMessage.message);
