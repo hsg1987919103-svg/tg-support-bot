@@ -17,7 +17,6 @@ if (!WEBHOOK_URL.startsWith("https://")) WEBHOOK_URL = "https://" + WEBHOOK_URL;
 if (!WEBHOOK_URL.endsWith("/webhook")) WEBHOOK_URL += "/webhook";
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
-
 console.log("BOT_TOKEN:", TOKEN ? TOKEN.substring(0, 8) + "..." : "未设置");
 console.log("Webhook URL:", WEBHOOK_URL);
 
@@ -99,11 +98,11 @@ app.post("/webhook", async (req, res) => {
       }
 
       // 保存消息
-      let savedMessage = { from: "user", type: "text", message: msg.text };
+      let savedMessage = { from: "user", type: "text", message: msg.text, message_id: msg.message_id };
       if (msg.text) savedMessage.type = "text";
-      else if (msg.photo) { savedMessage.type = "Photo"; savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id; }
-      else if (msg.voice) { savedMessage.type = "Voice"; savedMessage.file_id = msg.voice.file_id; }
-      else if (msg.document) { savedMessage.type = "Document"; savedMessage.file_id = msg.document.file_id; }
+      else if (msg.photo) { savedMessage.type = "Photo"; savedMessage.file_id = msg.photo[msg.photo.length - 1].file_id; savedMessage.message_id = msg.message_id; }
+      else if (msg.voice) { savedMessage.type = "Voice"; savedMessage.file_id = msg.voice.file_id; savedMessage.message_id = msg.message_id; }
+      else if (msg.document) { savedMessage.type = "Document"; savedMessage.file_id = msg.document.file_id; savedMessage.message_id = msg.message_id; }
       saveMessage(userId, savedMessage);
 
       // 转发到客服群子话题，隐藏 ID/用户名
@@ -112,7 +111,7 @@ app.post("/webhook", async (req, res) => {
       else sendFile(GROUP_CHAT_ID, savedMessage.type, savedMessage.file_id, null, topicId);
     }
 
-    // -------- 客服消息 --------
+    // -------- 客服消息（支持引用客户消息）--------
     if (update.message && update.message.chat.id === GROUP_CHAT_ID) {
       const msg = update.message;
       const topicId = msg.message_thread_id;
@@ -130,9 +129,18 @@ app.post("/webhook", async (req, res) => {
 
       saveMessage(userId, savedMessage);
 
+      // 支持客服引用客户消息回复
+      let replyTo = null;
+      if (msg.reply_to_message) {
+        const history = chatHistory[userId];
+        // 找到被引用的客户消息
+        const replied = history.find(m => m.message_id === msg.reply_to_message.message_id && m.from === "user");
+        if (replied) replyTo = replied.message_id;
+      }
+
       // 自动转发给客户
-      if (savedMessage.type === "text") sendMessage(userId, savedMessage.message);
-      else sendFile(userId, savedMessage.type, savedMessage.file_id);
+      if (savedMessage.type === "text") sendMessage(userId, savedMessage.message, replyTo);
+      else sendFile(userId, savedMessage.type, savedMessage.file_id, replyTo);
     }
 
     res.sendStatus(200);
